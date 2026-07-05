@@ -1,0 +1,654 @@
+# Minimal Linux Kernel World Slice v1.0
+# coding-blueprints v2 — workspace-scoped, minimal strictness
+# Source: Linux 7.2-rc1 (~/Documents/code/linux/)
+
+WorldSlice:
+
+  Metadata:
+    question: "A minimal world to understand the Linux kernel"
+    normalized_objective: "Cover the three core mechanisms of the Linux kernel: boot sequence, process scheduling, and memory management — with their entities, relationships, constraints, and causal chains."
+    scope: workspace-scoped
+    strictness: minimal
+    source_repo: "Linux 7.2-rc1 — ~/Documents/code/linux/"
+    non_goals:
+      - "Do not cover drivers/ (53% of codebase, peripheral)"
+      - "Do not cover fs/, net/, security/, sound/ subsystems"
+      - "Do not enumerate system calls"
+      - "Do not enumerate arch port details"
+      - "Do not cover RCU, lockdep, tracing, cgroup, futex, or other kernel sub-modules"
+
+  ConsumerInstructions:
+    reasoning_boundary:
+      - "Treat this World Slice as the complete known world."
+      - "Use only facts supported by this World Slice."
+      - "Do not invent missing entities, relationships, constraints, mechanisms, states, APIs, or call paths."
+      - "Separate Observation, Assumption, and Conclusion."
+      - "Never present an assumption as a fact."
+    insufficient_scope_behavior:
+      - "Stop when the World Slice is insufficient."
+      - "Identify the exact missing information."
+      - "Explain why the missing information is required."
+      - "Form a copy-ready Scope Expansion Query."
+      - "Do not continue by guessing."
+    response_style:
+      name: "Technician Caveman"
+      rules:
+        - "Use short sentences."
+        - "Preserve technical terms."
+        - "Prefer A → B → C causal chains."
+        - "Prefer execution flow over essay prose."
+        - "Avoid marketing language."
+        - "Avoid unnecessary abstraction."
+        - "Avoid speculative narrative."
+        - "State uncertainty explicitly."
+      preferred_structure:
+        - "Observation"
+        - "Mechanism"
+        - "Call Stack"
+        - "Constraint"
+        - "Conclusion"
+        - "Scope Expansion Query"
+    uncertainty_format:
+      marker: "[Uncertain]"
+      behavior:
+        - "State what is unknown."
+        - "State what evidence is missing."
+        - "Produce a Scope Expansion Query."
+    expansion_query_template: |
+      WORLD_SLICE_REQUEST:
+        question: "<specific unresolved question>"
+        scope: "<workspace-scoped|module-scoped|path-scoped>"
+        strictness: minimal
+        target:
+          - "<smallest missing module, path, symbol, mechanism, API, or data format>"
+      Missing because:
+        - "<current World Slice lacks required fact>"
+        - "<answer depends on missing evidence>"
+
+  Entities:
+    - id: E1
+      name: start_kernel
+      type: function
+      description: >
+        Kernel entry point (init/main.c:972). Called by arch boot code.
+        Sets up traps, IRQs, early console, memory manager, scheduler,
+        then calls rest_init() to spawn PID 1 (init).
+      PROV:
+        - init/main.c:L972
+
+    - id: E2
+      name: task_struct
+      type: struct
+      description: >
+        Central process descriptor. Every thread in the system has exactly one.
+        Contains: scheduling policy/priority, cpumask, mm_struct pointer,
+        files_struct, signal handling, namespaces, cgroup membership, stack.
+      PROV:
+        - include/linux/sched.h:L826-L880
+
+    - id: E3
+      name: mm_struct
+      type: struct
+      description: >
+        Memory descriptor for a process. Contains page table root (pgd),
+        VMA list (mmap), brk, stack area, RSS counters, lock.
+        Shared across threads in same process. Kernel threads have mm=NULL.
+      PROV:
+        - include/linux/mm_types.h:L1160-L1210
+
+    - id: E4
+      name: struct rq (runqueue)
+      type: struct
+      description: >
+        Per-CPU runqueue. One per logical CPU. Contains CFS runqueue (cfs_rq),
+        RT runqueue (rt_rq), DL runqueue (dl_rq), current task pointer,
+        nr_running counter, load tracking data. The scheduler reads/writes rq.
+      PROV:
+        - kernel/sched/sched.h:L1135-L1170
+
+    - id: E5
+      name: schedule / __schedule_loop
+      type: function
+      description: >
+        Main scheduling entry point. schedule() calls __schedule_loop(SM_NONE)
+        which picks the next task from a runqueue and calls context_switch().
+        Must be called with preemption disabled.
+      PROV:
+        - kernel/sched/core.c:L7316-L7320
+
+    - id: E6
+      name: context_switch
+      type: function
+      description: >
+        Switches MM state (page tables via switch_mm) and CPU register state
+        (switch_to). Decides whether to switch mm or stay lazy based on
+        whether next->mm is NULL (kernel thread).
+      PROV:
+        - kernel/sched/core.c:L5451-L5465
+
+    - id: E7
+      name: rest_init / kernel_init
+      type: function
+      description: >
+        Called at the end of start_kernel(). rest_init() creates PID 0 (idle)
+        and PID 1 (kernel_init thread via kernel_thread). kernel_init runs
+        kernel_init_freeable() which calls smp_init, sched_init_smp,
+        do_basic_setup() (drivers, fs), then executes the init binary.
+      PROV:
+        - init/main.c:L1486
+
+    - id: E8
+      name: struct page
+      type: struct
+      description: >
+        Fundamental memory page descriptor. Each physical 4KB page (or
+        compound page head) has one struct page. Contains flags, refcount,
+        mapcount, lru list, mapping pointer. Buddy allocator returns
+        struct page* via __alloc_pages_noprof().
+      PROV:
+        - include/linux/mm_types.h:L80-L90
+
+    - id: E9
+      name: struct folio
+      type: struct
+      description: >
+        Wrapper around 1+ struct pages. Newer API for filesystem/MM
+        interaction. Replaces the compound page pattern. A folio is
+        guaranteed to be page-aligned and is never a tail page.
+      PROV:
+        - include/linux/mm_types.h:L402-L410
+
+    - id: E10
+      name: __alloc_pages_noprof (buddy allocator)
+      type: function
+      description: >
+        Core physical page allocator. Allocates 2^order contiguous physical
+        pages. Returns struct page* on success. Uses buddy algorithm on
+        per-zone free_area lists. Backed by free_area_init() which
+        initialises the zone/page structures during boot.
+      PROV:
+        - mm/page_alloc.c:L5333-L5345
+
+    - id: E11
+      name: struct kmem_cache
+      type: struct
+      description: >
+        SLUB allocator cache descriptor. Caches objects of same size.
+        Per-CPU sheaves for fast allocation. kmalloc() is backed by
+        a set of kmem_cache objects for powers-of-two sizes.
+        create_kmalloc_caches() sets up the array at boot.
+      PROV:
+        - mm/slab.h:L222-L245
+
+    - id: E12
+      name: vmalloc_noprof
+      type: function
+      description: >
+        Contiguous virtual memory allocator. Maps physically non-contiguous
+        pages into a contiguous kernel virtual address range. Used for
+        large allocations (> PAGE_SIZE) where physically contiguous memory
+        is not required. Slower than kmalloc.
+      PROV:
+        - mm/vmalloc.c:L4176-L4180
+
+    - id: E13
+      name: mm_core_init / mm_core_init_early
+      type: function
+      description: >
+        Memory management subsystem initialization in boot.
+        mm_core_init_early(): free_area_init() (zone/page struct setup).
+        mm_core_init(): build_all_zonelists, page_alloc_init_cpuhp,
+        memblock_free_all(), kmem_cache_init(), vmalloc_init().
+      PROV:
+        - mm/mm_init.c:L2688-L2700
+
+    - id: E14
+      name: kernel_clone / copy_process
+      type: function
+      description: >
+        Process creation entry point. kernel_clone() is called by fork/vfork/clone
+        syscalls. It calls copy_process() which duplicates task_struct,
+        copies mm (or shares if CLONE_VM), copies files, signal handlers,
+        and places the new task on the runqueue via wake_up_new_task().
+      PROV:
+        - kernel/fork.c:L2694
+
+  Relationships:
+    - id: R1
+      source: start_kernel
+      target: mm_core_init_early
+      type: calls
+      description: "start_kernel() calls mm_core_init_early() to set up free_area_init() (zone/page structures)."
+      PROV:
+        - init/main.c:L972-L988
+
+    - id: R2
+      source: start_kernel
+      target: sched_init
+      type: calls
+      description: "start_kernel() calls sched_init() (kernel/sched/core.c:8915) to initialize per-CPU runqueues and scheduler classes."
+      PROV:
+        - kernel/sched/core.c:L8915
+
+    - id: R3
+      source: start_kernel
+      target: rest_init
+      type: calls
+      description: "start_kernel() ends by calling rest_init(), which spawns the idle task and init thread."
+      PROV:
+        - init/main.c:L972
+
+    - id: R4
+      source: mm_core_init
+      target: create_kmalloc_caches
+      type: calls
+      description: "mm_core_init() calls kmem_cache_init() which calls create_kmalloc_caches() to set up the kmalloc slab caches."
+      PROV:
+        - mm/mm_init.c:L2715-L2720
+        - mm/slab_common.c:L994
+
+    - id: R5
+      source: mm_core_init
+      target: vmalloc_init
+      type: calls
+      description: "mm_core_init() initialises vmalloc subsystem after kmem_cache is ready."
+      PROV:
+        - mm/mm_init.c:L2720-L2730
+
+    - id: R6
+      source: task_struct
+      target: mm_struct
+      type: contains
+      description: "task_struct->mm points to the mm_struct. NULL for kernel threads."
+      PROV:
+        - include/linux/sched.h:L826-L880
+
+    - id: R7
+      source: task_struct
+      target: struct rq
+      type: placed_on
+      description: "The scheduler places each running task on a per-CPU runqueue. task_struct->on_rq flag indicates active placement."
+      PROV:
+        - kernel/sched/sched.h:L1135-L1170
+
+    - id: R8
+      source: schedule
+      target: context_switch
+      type: triggers
+      description: "schedule() selects next task from rq, then calls context_switch() to switch mm and registers."
+      PROV:
+        - kernel/sched/core.c:L7316-L7320
+
+    - id: R9
+      source: context_switch
+      target: mm_struct
+      type: switches
+      description: "context_switch() calls switch_mm() to load the next process's page tables. Skips for kernel threads (lazy switch)."
+      PROV:
+        - kernel/sched/core.c:L5451-L5475
+
+    - id: R10
+      source: __alloc_pages_noprof
+      target: struct page
+      type: allocates
+      description: "Buddy allocator: __alloc_pages_noprof() returns struct page* for physically contiguous pages."
+      PROV:
+        - mm/page_alloc.c:L5333-L5345
+
+    - id: R11
+      source: struct kmem_cache
+      target: struct page
+      type: allocates_from
+      description: "SLUB allocator: kmem_cache uses buddy-allocated pages to create slab sheaves for small object allocation."
+      PROV:
+        - mm/slab.h:L222-L245
+        - mm/slub.c:L4561
+
+    - id: R12
+      source: kernel_clone
+      target: task_struct
+      type: creates
+      description: "kernel_clone() -> copy_process() duplicates task_struct and structures. New task placed on runqueue via wake_up_new_task()."
+      PROV:
+        - kernel/fork.c:L2694
+
+  Constraints:
+    - id: C1
+      applies_to: schedule
+      description: "schedule() must be called with preemption disabled. sched_init() must complete before any task can be created."
+      PROV:
+        - kernel/sched/core.c:L7316-L7320
+
+    - id: C2
+      applies_to: memory allocation
+      description: "kmalloc (SLUB) is for small objects (< 8MB typical). vmalloc for large virtual allocations. __alloc_pages for physical page allocations. Boot allocator (memblock) used before buddy is ready."
+      PROV:
+        - mm/page_alloc.c:L5333-L5345
+        - mm/vmalloc.c:L4176-L4180
+        - mm/slab.h:L222-L245
+
+    - id: C3
+      applies_to: mm_core_init
+      description: "mm_core_init() must run after smp_setup but before any process creation. Must free memblock before kmem_cache_init."
+      PROV:
+        - mm/mm_init.c:L2688-L2720
+
+    - id: C4
+      applies_to: kernel_clone
+      description: "kernel_clone() must not be called before scheduler is initialized and PID 1 is running."
+      PROV:
+        - kernel/fork.c:L2694
+
+  Mechanisms:
+    - id: M1
+      name: BootSequence
+      description: "Arch boot code → start_kernel() → subsystems init → rest_init() → PID 1 (init). The entire kernel bootstrap in order."
+      chain:
+        - step: "Arch boot code transfers control"
+          entity: start_kernel
+          action: "Bootloader/jump to start_kernel() at init/main.c:972"
+          PROV:
+            - init/main.c:L972
+        - step: "Subsystem initialization"
+          entity: start_kernel
+          action: "Call setup_arch, mm_core_init_early, sched_init, init_IRQ, console_init, workqueue_init_early, random_init, memblock allocator active"
+          PROV:
+            - init/main.c:L972-L988
+        - step: "Memory manager bootstrap"
+          entity: mm_core_init
+          action: "build_all_zonelists, memblock_free_all(), kmem_cache_init(), vmalloc_init() — full memory allocator stack ready"
+          PROV:
+            - mm/mm_init.c:L2688-L2730
+        - step: "Scheduler bootstrap"
+          entity: sched_init
+          action: "Initialize per-CPU runqueues, CFS/RT/DL scheduler classes, idle task"
+          PROV:
+            - kernel/sched/core.c:L8915
+        - step: "rest_init spawns PID 0 and PID 1"
+          entity: rest_init
+          action: "Create idle thread (PID 0) and kernel_init thread (PID 1). kernel_init waits for kthreadd."
+          PROV:
+            - init/main.c:L1486
+        - step: "kernel_init_freeable completes setup"
+          entity: kernel_init
+          action: "smp_init, sched_init_smp, do_basic_setup() (drivers, filesystems), mount rootfs, free initmem"
+          PROV:
+            - init/main.c:L1539-L1560
+            - init/main.c:L1629-L1660
+        - step: "Init binary execution"
+          entity: kernel_init
+          action: "run_init_process(init_binary) — user-space PID 1 starts executing"
+          PROV:
+            - init/main.c:L1539-L1560
+      effects:
+        - entity: PID 0 (idle)
+          change:
+            from: NonExistent
+            to: Running as idle loop
+          PROV:
+            - init/main.c:L1486
+        - entity: PID 1 (init)
+          change:
+            from: NonExistent
+            to: Running user-space binary
+          PROV:
+            - init/main.c:L1539-L1560
+      constraints:
+        - C3
+      PROV:
+        - init/main.c:L972-L1560
+        - mm/mm_init.c:L2688-L2730
+        - kernel/sched/core.c:L8915
+
+    - id: M2
+      name: ContextSwitch
+      description: "schedule() picks next task from runqueue → context_switch() switches mm and registers. The core scheduling cycle."
+      chain:
+        - step: "schedule() called"
+          entity: schedule
+          action: "Prepare: sched_submit_work(tsk). Call __schedule_loop(SM_NONE)."
+          PROV:
+            - kernel/sched/core.c:L7316-L7320
+        - step: "Next task selected"
+          entity: struct rq
+          action: "Scheduler class (CFS/RT/DL) picks next task from its runqueue. Task marked as running on new CPU."
+          PROV:
+            - kernel/sched/sched.h:L1135-L1170
+        - step: "context_switch() invoked"
+          entity: context_switch
+          action: "Switch MM: if next->mm, call membarrier_switch_mm + switch_mm (load page tables). If kernel thread (next->mm==NULL), lazy switch. Switch CPU registers via switch_to()."
+          PROV:
+            - kernel/sched/core.c:L5451-L5475
+      effects:
+        - entity: task_struct (prev)
+          change:
+            from: Running on CPU
+            to: On runqueue (or blocked)
+          PROV:
+            - kernel/sched/core.c:L7316-L7320
+        - entity: task_struct (next)
+          change:
+            from: On runqueue
+            to: Running on CPU
+          PROV:
+            - kernel/sched/core.c:L5451-L5475
+      constraints:
+        - C1
+      PROV:
+        - kernel/sched/core.c:L7316-L7320
+        - kernel/sched/core.c:L5451-L5475
+
+    - id: M3
+      name: ProcessCreation
+      description: "fork/vfork/clone syscall → kernel_clone() → copy_process() → wake_up_new_task(). The complete process birth sequence."
+      chain:
+        - step: "Syscall dispatches to kernel_clone"
+          entity: kernel_clone
+          action: "Setup kernel_clone_args from syscall parameters (flags, stack, parent_tid, child_tid)."
+          PROV:
+            - kernel/fork.c:L2694
+        - step: "copy_process duplicates task_struct"
+          entity: kernel_clone
+          action: "Copy task_struct, inherit or copy mm (CLONE_VM decides share vs copy), dup_task_struct for stack. Set up signal/files/fs namespaces."
+          PROV:
+            - kernel/fork.c:L2694
+        - step: "New task placed on runqueue"
+          entity: kernel_clone
+          action: "Call wake_up_new_task(p) which selects initial CPU via select_task_rq and enqueues task to runqueue. PID returned to user."
+          PROV:
+            - kernel/fork.c:L2694
+      effects:
+        - entity: task_struct (new)
+          change:
+            from: NonExistent
+            to: On runqueue, pid assigned
+          PROV:
+            - kernel/fork.c:L2694
+      constraints:
+        - C4
+      PROV:
+        - kernel/fork.c:L2694
+
+    - id: M4
+      name: PhysicalPageAllocation
+      description: "Buddy allocator: __alloc_pages_noprof() splits/coalesces free_area lists to satisfy 2^order page requests. Backbone of all kernel memory."
+      chain:
+        - step: "Allocation request"
+          entity: __alloc_pages_noprof
+          action: "Receive gfp_t flags + order. Convert to preferred zone + migratetype. Call __alloc_frozen_pages_noprof()."
+          PROV:
+            - mm/page_alloc.c:L5333-L5345
+        - step: "Buddy search"
+          entity: __alloc_pages_noprof
+          action: "Scan free_area[order] lists. If empty, try higher order (split). If OOM, invoke direct reclaim or OOM killer."
+          PROV:
+            - mm/page_alloc.c:L5333-L5345
+        - step: "Page returned"
+          entity: __alloc_pages_noprof
+          action: "Set page refcounted. Return struct page*. Kernel maps via fixmap/vmap. User maps via page tables."
+          PROV:
+            - mm/page_alloc.c:L5333-L5345
+      effects:
+        - entity: struct page
+          change:
+            from: In free_area list (buddy)
+            to: Allocated, refcount=1
+          PROV:
+            - mm/page_alloc.c:L5333-L5345
+      constraints:
+        - C2
+      PROV:
+        - mm/page_alloc.c:L5333-L5345
+
+    - id: M5
+      name: SlabObjectAllocation
+      description: "kmalloc is backed by kmem_cache. SLUB allocates from per-CPU sheaves → partial slabs → buddy pages. Used for all small kernel allocations."
+      chain:
+        - step: "kmalloc called"
+          entity: struct kmem_cache
+          action: "Map size to kmalloc cache. Fetch object from cpu_sheaves (per-CPU, lockless fast path)."
+          PROV:
+            - mm/slab.h:L222-L245
+        - step: "Sheave miss (slow path)"
+          entity: struct kmem_cache
+          action: "Fetch from partial slab list (locked). If empty, allocate new slab pages via __alloc_pages_noprof (buddy)."
+          PROV:
+            - mm/slab.h:L222-L245
+            - mm/slub.c:L4561
+        - step: "Object returned"
+          entity: struct kmem_cache
+          action: "Return pointer to object within slab. Object size = kmem_cache->size (includes metadata)."
+          PROV:
+            - mm/slab.h:L222-L245
+      effects:
+        - entity: Kernel heap
+          change:
+            from: No free object in cache
+            to: Object allocated, ready for use
+          PROV:
+            - mm/slab.h:L222-L245
+      constraints:
+        - C2
+      PROV:
+        - mm/slab.h:L222-L245
+        - mm/slub.c:L4561
+
+    - id: M6
+      name: VirtualContiguousAllocation
+      description: "vmalloc maps non-contiguous physical pages into a contiguous kernel virtual range. Used for large buffers, modules, and dynamic loading."
+      chain:
+        - step: "vmalloc called"
+          entity: vmalloc_noprof
+          action: "Calculate required pages. Allocate physically non-contiguous pages via alloc_pages (buddy)."
+          PROV:
+            - mm/vmalloc.c:L4176-L4180
+        - step: "Virtual mapping"
+          entity: vmalloc_noprof
+          action: "Find free virtual range in vmap_area. Create page table entries mapping physical pages into contiguous virtual space."
+          PROV:
+            - mm/vmalloc.c:L4176-L4180
+        - step: "Return virtual address"
+          entity: vmalloc_noprof
+          action: "Return kernel virtual address. Pages remain physically scattered but virtually contiguous."
+          PROV:
+            - mm/vmalloc.c:L4176-L4180
+      effects:
+        - entity: Kernel virtual address space
+          change:
+            from: Free vmap area
+            to: Mapped contiguous virtual range
+          PROV:
+            - mm/vmalloc.c:L4176-L4180
+      constraints:
+        - C2
+      PROV:
+        - mm/vmalloc.c:L4176-L4180
+
+  MissingScope:
+    - topic: "VFS / filesystem implementation (VFS layer, ext4, dentry cache, inode)"
+      reason: "Understanding block I/O and file operations is relevant to complete kernel picture but is a separate subsystem."
+      required_for: "Answering how files are read/written through the kernel"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does the Linux VFS layer connect a file read from user-space to block device I/O?"
+          scope: module-scoped
+          strictness: minimal
+          target:
+            - "fs/read_write.c"
+            - "fs/ext4/"
+            - "block/"
+        Missing because:
+          - "Current slice only covers kernel boot, scheduling, and memory management"
+          - "No entities for dentry, inode, superblock, bio, or request queue"
+
+    - topic: "Interrupt handling and IRQ subsystem"
+      reason: "start_kernel calls init_IRQ but the full interrupt dispatch chain (IRQ → handler) is not scoped."
+      required_for: "Answering how hardware events reach kernel and user processes"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does the Linux IRQ subsystem deliver a hardware interrupt from IOAPIC to a device driver's handler?"
+          scope: module-scoped
+          strictness: minimal
+          target:
+            - "kernel/irq/"
+            - "arch/x86/kernel/irq.c"
+        Missing because:
+          - "Current slice covers scheduling but not the preemption trigger (interrupts)"
+
+    - topic: "RCU (Read-Copy-Update) subsystem"
+      reason: "RCU is a core synchronization mechanism used throughout kernel/sched and mm. Not covered in this minimal slice."
+      required_for: "Answering kernel synchronization semantics beyond spinlocks/mutexes"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does RCU synchronize grace periods in the Linux kernel?"
+          scope: module-scoped
+          strictness: minimal
+          target:
+            - "kernel/rcu/"
+            - "include/linux/rcupdate.h"
+        Missing because:
+          - "Current slice covers scheduling and memory but not RCU-based synchronization"
+
+  Coverage:
+    Included:
+      - target: init/main.c
+        reason: "Kernel boot entry (start_kernel, rest_init, kernel_init)"
+      - target: kernel/sched/core.c
+        reason: "Scheduler core (schedule, context_switch, sched_init)"
+      - target: kernel/sched/sched.h
+        reason: "struct rq definition"
+      - target: kernel/fork.c
+        reason: "Process creation (kernel_clone, copy_process)"
+      - target: mm/page_alloc.c
+        reason: "Physical page allocator (__alloc_pages_noprof, buddy system)"
+      - target: mm/slab.h + mm/slub.c
+        reason: "SLUB allocator (struct kmem_cache, kmalloc backend)"
+      - target: mm/vmalloc.c
+        reason: "Virtual contiguously allocator"
+      - target: mm/mm_init.c
+        reason: "Memory subsystem boot initialization"
+      - target: mm/slab_common.c
+        reason: "kmalloc cache setup (create_kmalloc_caches)"
+      - target: include/linux/sched.h
+        reason: "task_struct definition"
+      - target: include/linux/mm_types.h
+        reason: "mm_struct, struct page, struct folio definitions"
+      - target: include/linux/slab.h
+        reason: "kmem_cache API signature"
+    Excluded:
+      - target: drivers/
+        reason: "53% of codebase, peripheral device support — not required for core kernel understanding"
+      - target: fs/
+        reason: "Filesystem implementation — separate subsystem"
+      - target: net/
+        reason: "Networking stack — separate subsystem"
+      - target: arch/
+        reason: "Architecture port details — only the generic kernel path is relevant"
+      - target: kernel/irq/
+        reason: "IRQ subsystem — listed as MissingScope"
+      - target: kernel/rcu/
+        reason: "RCU synchronization — listed as MissingScope"
+      - target: kernel/trace/
+        reason: "Tracing subsystem — not required for core understanding"
+      - target: kernel/locking/
+        reason: "Locking primitives — referenced implicitly but not needed as entities"

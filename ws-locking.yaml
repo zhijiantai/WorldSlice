@@ -1,0 +1,399 @@
+# Linux Locking World Slice v1.0
+# Expansion from ws-minimal-linux.yaml — covers spinlock, mutex, rwsem, and preemption
+
+WorldSlice:
+
+  Metadata:
+    question: "Linux kernel中spinlock、mutex和preemption的关系"
+    normalized_objective: "Cover spinlock, mutex, rw_semaphore implementations, their relationship to preemption, and the connection to schedule() via preempt_count and might_sleep."
+    scope: module-scoped
+    strictness: minimal
+    source_repo: "Linux 7.2-rc1 — ~/Documents/code/linux/"
+    non_goals:
+      - "Do not cover lockdep/debugging internals"
+      - "Do not cover seqlock or RCU (separate WS)"
+      - "Do not cover arch-specific spinlock implementations (arch_spin_lock)"
+      - "Do not cover PREEMPT_RT variant details"
+      - "Do not cover percpu_rw_semaphore or other exotic locks"
+      - "Do not cover lock ordering or deadlock theory"
+
+  ConsumerInstructions:
+    reasoning_boundary:
+      - "Treat this World Slice as complete for understanding spinlock, mutex, preemption interaction."
+      - "Do not invent missing lock types or atomic context rules."
+    insufficient_scope_behavior:
+      - "Stop when insufficient. Form copy-ready expansion query."
+    response_style:
+      name: "Technician Caveman"
+      rules:
+        - "Short sentences."
+        - "A → B → C causal chains."
+        - "State uncertainty explicitly."
+
+  Entities:
+    - id: E1
+      name: raw_spinlock_t (struct raw_spinlock)
+      type: struct
+      description: >
+        Lowest-level spinlock. Contains arch_spinlock_t raw_lock.
+        Non-sleepable: held with preemption disabled.
+        Used as the building block for all other locks (spinlock_t,
+        mutex->wait_lock, rwsem->wait_lock).
+      PROV:
+        - include/linux/spinlock_types_raw.h:L13-L23
+
+    - id: E2
+      name: spinlock_t (struct spinlock)
+      type: struct
+      description: >
+        Standard spinlock. Non-PREEMPT_RT: wraps raw_spinlock as .rlock field.
+        PREEMPT_RT: maps to rt_mutex. spin_lock() = raw_spin_lock(&lock->rlock).
+        Cannot sleep while held — disables preemption on non-RT kernels.
+      PROV:
+        - include/linux/spinlock_types.h:L30-L57
+
+    - id: E3
+      name: mutex (struct mutex)
+      type: struct
+      description: >
+        Sleeping mutual exclusion lock. Only one task can hold.
+        Cannot be used in atomic context (might_sleep() check).
+        Contains: owner (atomic_long), wait_lock (raw_spinlock_t for waiter list),
+        osq (optimistic spinning queue), first_waiter.
+        Fast path: __mutex_trylock_fast(). Slow path: __mutex_lock_slowpath().
+      PROV:
+        - include/linux/mutex_types.h:L41-L57
+
+    - id: E4
+      name: rw_semaphore (struct rw_semaphore)
+      type: struct
+      description: >
+        Reader-writer sleeping lock. Multiple readers or exactly one writer.
+        Contains: count (atomic_long, encodes locked state + reader count),
+        owner (atomic_long, writer task or reader flags),
+        osq (optimistic spinning for writer), wait_lock, first_waiter.
+        Readers take when count >= 0, writer sets bit 0.
+      PROV:
+        - include/linux/rwsem.h:L48-L68
+
+    - id: E5
+      name: preempt_count (per-task/CPU counter)
+      type: field
+      description: >
+        Integer in thread_info. Tracks: preemption disable depth (low bits),
+        hardirq count, softirq count, NMI count.
+        preempt_count() == 0 → preemption allowed.
+        preempt_disable() increments. spin_lock() increments (via preempt count offset).
+        preempt_enable() decrements + calls __preempt_schedule() if counter reaches 0
+        and TIF_NEED_RESCHED is set.
+      PROV:
+        - include/asm-generic/preempt.h:L9-L15
+        - include/linux/preempt.h:L203-L207
+
+    - id: E6
+      name: TIF_NEED_RESCHED
+      type: flag
+      description: >
+        Per-CPU/thread flag set by scheduler tick or wakeup.
+        Checked by: preempt_enable() (via preempt_count_dec_and_test()),
+        ret_from_fork, ret_to_user, resched_irq.
+        When preempt_count == 0 and TIF_NEED_RESCHED is set → preemption occurs.
+      PROV:
+        - include/asm-generic/preempt.h:L62-L68
+
+    - id: E7
+      name: schedule_preempt_disabled
+      type: function
+      description: >
+        Bridge between preemption and scheduler. Called when a lock holder
+        needs to sleep (e.g., mutex_lock slowpath). Temporarily re-enables
+        preemption, calls schedule(), then re-disables.
+        Pattern: sched_preempt_enable_no_resched() → schedule() → preempt_disable().
+      PROV:
+        - kernel/sched/core.c:L7380-L7385
+
+    - id: E8
+      name: _raw_spin_lock / __raw_spin_lock
+      type: function
+      description: >
+        Raw spinlock acquisition. Calls do_raw_spin_lock() →
+        arch_spin_lock(&lock->raw_lock). On non-RT: preemption remains
+        disabled through the locked region.
+      PROV:
+        - kernel/locking/spinlock.c:L156-L160
+        - include/linux/spinlock.h:L184-L188
+
+    - id: E9
+      name: __mutex_trylock_fast / __mutex_lock_slowpath
+      type: function
+      description: >
+        Fast path: atomic cmpxchg on mutex->owner. If uncontended, acquired
+        without sleeping. Slow path: optimistic spinning (osq) → if spinner
+        fails → schedule_preempt_disabled() → task blocks on wait_list.
+      PROV:
+        - kernel/locking/mutex.c:L314-L320
+
+    - id: E10
+      name: might_sleep / __might_sleep
+      type: function
+      description: >
+        Runtime check in mutex_lock(), vmalloc(), etc. Prints stack trace
+        if called in atomic context (preempt_count() != 0 or in_interrupt()).
+        Debug-only on most configs, always calls might_resched() →
+        __cond_resched() on PREEMPT_NONE/VOLUNTARY kernels.
+      PROV:
+        - include/linux/kernel.h:L48-L56
+
+  Relationships:
+    - id: R1
+      source: spinlock_t
+      target: raw_spinlock_t
+      type: wraps
+      description: "spinlock_t contains raw_spinlock_t as .rlock. spin_lock() = raw_spin_lock(&lock->rlock)."
+      PROV:
+        - include/linux/spinlock_types.h:L30-L57
+        - include/linux/spinlock.h:L339-L342
+
+    - id: R2
+      source: raw_spin_lock
+      target: preempt_count
+      type: disables_preemption
+      description: "raw_spin_lock() disables preemption (may also disable local IRQs for _irq variants). preemption is re-enabled by raw_spin_unlock()."
+      PROV:
+        - include/linux/spinlock.h:L184-L188
+
+    - id: R3
+      source: mutex
+      target: raw_spinlock_t
+      type: contains
+      description: "mutex->wait_lock is a raw_spinlock_t protecting the waiter list and state changes."
+      PROV:
+        - include/linux/mutex_types.h:L41-L57
+
+    - id: R4
+      source: mutex
+      target: schedule_preempt_disabled
+      type: calls_on_contention
+      description: "mutex_lock() slow path may block and call schedule() via schedule_preempt_disabled() when optimistic spinning fails."
+      PROV:
+        - kernel/locking/mutex.c:L314-L320
+
+    - id: R5
+      source: mutex_lock
+      target: might_sleep
+      type: calls
+      description: "mutex_lock() calls might_sleep() first to assert we're not in atomic context."
+      PROV:
+        - kernel/locking/mutex.c:L314-L320
+
+    - id: R6
+      source: preempt_count
+      target: TIF_NEED_RESCHED
+      type: enables_preemption
+      description: "preempt_enable() decrements preempt_count. When 0 and TIF_NEED_RESCHED → __preempt_schedule() → schedule()."
+      PROV:
+        - include/linux/preempt.h:L195-L200
+        - include/asm-generic/preempt.h:L62-L68
+
+    - id: R7
+      source: rw_semaphore
+      target: raw_spinlock_t
+      type: contains
+      description: "rwsem->wait_lock is a raw_spinlock_t protecting the waiter list."
+      PROV:
+        - include/linux/rwsem.h:L48-L68
+
+    - id: R8
+      source: preempt_disable
+      target: preempt_count
+      type: increments
+      description: "preempt_disable() → preempt_count_inc() → __preempt_count_add(1). preempt_count goes from 0 to 1 (or higher for nested)."
+      PROV:
+        - include/linux/preempt.h:L203-L207
+
+    - id: R9
+      source: preempt_enable
+      target: preempt_count
+      type: decrements
+      description: "preempt_enable() → barrier → if preempt_count_dec_and_test() → __preempt_schedule(). preempt_count goes from 1 to 0."
+      PROV:
+        - include/linux/preempt.h:L229-L234
+
+  Constraints:
+    - id: C1
+      applies_to: "spin_lock"
+      description: "spin_lock() must not be held across a sleeping operation (mutex_lock, vmalloc, copy_to/from_user). Detected by might_sleep() or DEBUG_ATOMIC_SLEEP."
+      PROV:
+        - include/linux/kernel.h:L48-L56
+
+    - id: C2
+      applies_to: "mutex_lock"
+      description: "mutex_lock() may only be called when preempt_count == 0 (not in atomic context) and not in IRQ context. Only the owner may unlock."
+      PROV:
+        - include/linux/mutex_types.h:L15-L35
+
+    - id: C3
+      applies_to: "schedule()"
+      description: "schedule() must only be called when preemption is disabled (preempt_count == 0 prior to the disable, or via schedule_preempt_disabled() which manages preemption)."
+      PROV:
+        - kernel/sched/core.c:L7380-L7385
+
+    - id: C4
+      applies_to: "raw_spin_lock"
+      description: "raw_spin_lock() must not be used in preemptible context if the critical section can sleep. Use mutex or sleepable locks for long-held regions."
+      PROV:
+        - include/linux/spinlock_types_raw.h:L13-L23
+
+  Mechanisms:
+    - id: M1
+      name: SpinlockAcquisition
+      description: "spin_lock() path: preemption disabled → arch_spin_lock on hardware word → critical section → preemption re-enabled"
+      chain:
+        - step: "spin_lock() called"
+          entity: spin_lock
+          action: "Call raw_spin_lock(&lock->rlock). Preemption already disabled or disables via preempt_count_inc()."
+          PROV:
+            - include/linux/spinlock.h:L339-L342
+        - step: "arch_spin_lock"
+          entity: raw_spinlock_t
+          action: "Arch-specific atomic operation on raw_lock word. Spins (busy-wait) until lock acquired. Memory barrier via smp_load_acquire/store_release."
+          PROV:
+            - include/linux/spinlock.h:L184-L188
+        - step: "Critical section"
+          entity: raw_spinlock_t
+          action: "Lock held. Preemption disabled. No sleeping. Interrupts may be disabled (_irq variants)."
+          PROV:
+            - include/linux/spinlock.h:L184-L188
+        - step: "spin_unlock()"
+          entity: spin_lock
+          action: "arch_spin_unlock. Preemption re-enabled. If TIF_NEED_RESCHED, preemption may occur immediately."
+          PROV:
+            - include/linux/spinlock.h:L184-L188
+      effects:
+        - entity: preempt_count
+          change:
+            from: Lower (may be 0)
+            to: Higher (preempt disabled)
+          PROV:
+            - include/linux/preempt.h:L203-L207
+      constraints:
+        - C1
+        - C4
+      PROV:
+        - include/linux/spinlock.h:L184-L188
+        - include/linux/spinlock.h:L339-L342
+
+    - id: M2
+      name: MutexLockSlowPath
+      description: "When mutex is contended: try fast lock → optimistic spinning → schedule() → block on wait_list → wake → retry"
+      chain:
+        - step: "Fast path attempt"
+          entity: __mutex_trylock_fast
+          action: "Atomic cmpxchg on mutex->owner. If owner == 0 (unlocked), acquire and return."
+          PROV:
+            - kernel/locking/mutex.c:L314-L320
+        - step: "might_sleep check"
+          entity: might_sleep
+          action: "Assert not in atomic context (preempt_count == 0, not in IRQ). If violated, print warning/stack."
+          PROV:
+            - include/linux/kernel.h:L48-L56
+        - step: "Optimistic spinning"
+          entity: mutex
+          action: "Spin on mutex->owner via osq (MCS lock queue). If owner is running on another CPU, busy-wait briefly. Saves context-switch cost for short holds."
+          PROV:
+            - kernel/locking/mutex.c:L314-L320
+        - step: "Block and schedule"
+          entity: schedule_preempt_disabled
+          action: "When spinner gives up: schedule_preempt_disabled() → enable preemption → schedule() → disable preemption. Task placed on wait_list."
+          PROV:
+            - kernel/sched/core.c:L7380-L7385
+        - step: "Wake and retry"
+          entity: mutex
+          action: "When owner unlocks (mutex_unlock), first_waiter is woken. Retry cmpxchg on owner."
+          PROV:
+            - kernel/locking/mutex.c:L576-L580
+      effects:
+        - entity: task_struct
+          change:
+            from: Running (spinning on osq)
+            to: Blocked on mutex wait_list (TASK_UNINTERRUPTIBLE)
+          PROV:
+            - kernel/locking/mutex.c:L314-L320
+        - entity: mutex->owner
+          change:
+            from: Previous owner
+            to: Current task (after acquisition)
+          PROV:
+            - kernel/locking/mutex.c:L314-L320
+      constraints:
+        - C2
+        - C3
+      PROV:
+        - kernel/locking/mutex.c:L314-L320
+        - kernel/sched/core.c:L7380-L7385
+
+    - id: M3
+      name: PreemptionCheck
+      description: "preempt_enable() → if count hits 0 + TIF_NEED_RESCHED → __preempt_schedule() → schedule(). The decision point for kernel preemption."
+      chain:
+        - step: "preempt_enable() called"
+          entity: preempt_enable
+          action: "barrier() then preempt_count_dec_and_test()."
+          PROV:
+            - include/linux/preempt.h:L229-L234
+        - step: "Counter check"
+          entity: preempt_count
+          action: "If preempt_count reaches 0 and TIF_NEED_RESCHED is set → return true."
+          PROV:
+            - include/asm-generic/preempt.h:L62-L68
+        - step: "Preemption"
+          entity: __preempt_schedule
+          action: "Call schedule(). Current task yields CPU. Resume later via context_switch back."
+          PROV:
+            - include/asm-generic/preempt.h:L62-L68
+      effects:
+        - entity: current task
+          change:
+            from: Running with preempt_count == 0
+            to: Context-switched out (yielded CPU)
+          PROV:
+            - include/asm-generic/preempt.h:L62-L68
+      constraints:
+        - C3
+      PROV:
+        - include/linux/preempt.h:L229-L234
+        - include/asm-generic/preempt.h:L62-L68
+
+  Coverage:
+    Included:
+      - target: include/linux/spinlock_types.h
+        reason: "spinlock_t definition"
+      - target: include/linux/spinlock_types_raw.h
+        reason: "raw_spinlock_t definition"
+      - target: include/linux/spinlock.h
+        reason: "spin_lock/raw_spin_lock API"
+      - target: include/linux/mutex_types.h
+        reason: "mutex struct definition"
+      - target: include/linux/mutex.h
+        reason: "mutex_lock/mutex_unlock API"
+      - target: kernel/locking/mutex.c
+        reason: "mutex_lock/mutex_unlock implementation"
+      - target: include/linux/rwsem.h
+        reason: "rw_semaphore struct definition"
+      - target: include/asm-generic/preempt.h
+        reason: "preempt_count, preempt_count_inc/dec"
+      - target: include/linux/preempt.h
+        reason: "preempt_disable/preempt_enable macros"
+      - target: kernel/locking/spinlock.c
+        reason: "_raw_spin_lock implementation"
+      - target: kernel/sched/core.c
+        reason: "schedule_preempt_disabled"
+      - target: include/linux/kernel.h
+        reason: "might_sleep definition"
+    Excluded:
+      - target: kernel/locking/lockdep.c
+        reason: "Lock debugging internals — not needed for understanding the primitives"
+      - target: include/linux/seqlock.h
+        reason: "Seqlock is separate locking mechanism — not in scope"
+      - target: arch/*/include/asm/spinlock.h
+        reason: "Arch-specific spinlock implementations — abstracted by arch_spin_lock"

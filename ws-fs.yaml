@@ -1,0 +1,527 @@
+# Linux Filesystem Write Path World Slice v1.0
+# Expansion from ws-vfs-block.yaml — covers buffered write, journaling, page writeback
+# coding-blueprints v2 — module-scoped, minimal strictness
+# Source: Linux 7.2-rc1 (~/Documents/code/linux/)
+
+WorldSlice:
+
+  Metadata:
+    question: "How does ext4 handle buffered writes from write() to journal commit?"
+    normalized_objective: "Cover the ext4 buffered write path: ksys_write → vfs_write → ext4_file_write_iter → generic_perform_write → ext4_write_begin/end → JBD2 journal transaction → page writeback (ext4_writepages)."
+    scope: module-scoped
+    strictness: minimal
+    source_repo: "Linux 7.2-rc1 — ~/Documents/code/linux/"
+    non_goals:
+      - "Do not cover O_DIRECT (direct I/O path)"
+      - "Do not cover btrfs/xfs/f2fs write paths"
+      - "Do not cover io_uring asynchronous write path"
+      - "Do not cover file locking or lease interactions"
+      - "Do not cover encryption/compression write paths"
+      - "Do not cover mmap write (page_mkwrite)"
+
+  ConsumerInstructions:
+    reasoning_boundary:
+      - "Treat this World Slice as complete for the ext4 buffered write → journal → writeback path."
+      - "Use only facts supported by provenance."
+      - "Do not invent missing transaction states, journal modes, or allocation details."
+      - "Separate Observation, Assumption, and Conclusion."
+    insufficient_scope_behavior:
+      - "Stop when the World Slice is insufficient."
+      - "Identify the exact missing information."
+      - "Explain why the missing information is required."
+      - "Form a copy-ready Scope Expansion Query."
+      - "Do not continue by guessing."
+    response_style:
+      name: "Technician Caveman"
+      rules:
+        - "Use short sentences."
+        - "Preserve technical terms."
+        - "Prefer A → B → C causal chains."
+        - "Prefer execution flow over essay prose."
+        - "Avoid marketing language."
+        - "State uncertainty explicitly."
+
+  Entities:
+    - id: E1
+      name: ext4_file_write_iter
+      type: function
+      description: >
+        ext4 write entry point from VFS (fs/ext4/file.c).
+        file->f_op->write_iter for ext4. Calls generic_perform_write()
+        for buffered writes, or ext4_dio_write_iter for O_DIRECT.
+        Wraps generic_file_write_iter() for buffered path.
+      PROV:
+        - fs/ext4/file.c:L130-L150
+
+    - id: E2
+      name: generic_perform_write
+      type: function
+      description: >
+        Generic buffered write loop (mm/filemap.c:2820).
+        Iterates over file offset range: for each page, calls
+        a_ops->write_begin, copies data from user-space, then calls
+        a_ops->write_end. Loops until all data written or error.
+      PROV:
+        - mm/filemap.c:L2820-L2865
+
+    - id: E3
+      name: ext4_write_begin
+      type: function
+      description: >
+        ext4 implementation of a_ops->write_begin (fs/ext4/inode.c:1288).
+        Gets folio via write_begin_get_folio(), preallocates buffer heads,
+        starts a JBD2 journal handle via ext4_journal_start().
+        Returns folio locked with handle active.
+      PROV:
+        - fs/ext4/inode.c:L1288-L1386
+
+    - id: E4
+      name: ext4_write_end
+      type: function
+      description: >
+        ext4 implementation of a_ops->write_end (fs/ext4/inode.c:1439).
+        Calls block_write_end() to copy data into buffer-backed folio,
+        updates i_size, marks inode dirty via ext4_mark_inode_dirty(),
+        then stops the journal handle via ext4_journal_stop().
+      PROV:
+        - fs/ext4/inode.c:L1439-L1506
+
+    - id: E5
+      name: __ext4_journal_start / ext4_journal_start (macro)
+      type: function
+      description: >
+        Wrapper to start a JBD2 journal handle for ext4
+        (fs/ext4/ext4_jbd2.h:225-237). Allocates handle_t from the
+        journal with nblocks credits. Calls jbd2_journal_start().
+        Returns a handle_t pointer for the running transaction.
+      PROV:
+        - fs/ext4/ext4_jbd2.h:L225-L237
+
+    - id: E6
+      name: jbd2_journal_start
+      type: function
+      description: >
+        JBD2: start a new journal handle (fs/jbd2/transaction.c:539).
+        If no running transaction exists on this journal, starts one.
+        Assigns handle to the running transaction, increments
+        transaction->t_handle_count. Handle tracks atomic operation.
+      PROV:
+        - fs/jbd2/transaction.c:L539-L560
+
+    - id: E7
+      name: jbd2_journal_stop
+      type: function
+      description: >
+        JBD2: stop a journal handle (fs/jbd2/transaction.c:1888).
+        Decrements handle->h_ref. On last reference: decrements
+        transaction->t_handle_count. If transaction is now
+        complete (no more handles, or handle requests commit),
+        wakes up the commit thread via j_commit_wait.
+      PROV:
+        - fs/jbd2/transaction.c:L1888-L1950
+
+    - id: E8
+      name: ext4_writepages
+      type: function
+      description: >
+        ext4 page writeback entry from writeback infrastructure
+        (fs/ext4/inode.c:3026). Called via a_ops->writepages when
+        kernel writeback decides to flush dirty pages. Delegates to
+        ext4_do_writepages() which maps blocks and submits bios.
+      PROV:
+        - fs/ext4/inode.c:L3026-L3054
+
+    - id: E9
+      name: writeback_control (struct wbc)
+      type: struct
+      description: >
+        Writeback control structure (include/linux/writeback.h).
+        Controls writeback behavior: sync_mode (WB_SYNC_NONE vs WB_SYNC_ALL),
+        nr_to_write (dirty page limit), range_start/end, for_kupdate,
+        for_background, etc. Passed to writepages callback.
+      PROV:
+        - include/linux/writeback.h:L52-L85
+
+    - id: E10
+      name: balance_dirty_pages
+      type: function
+      description: >
+        Dirty page throttling (mm/page-writeback.c:1206).
+        Called from write() path when dirty page count exceeds
+        dirty_ratio/dirty_background_ratio thresholds. Sleeps the
+        writer until writeback catches up. Prevents dirty saturation.
+      PROV:
+        - mm/page-writeback.c:L1206-L1290
+
+    - id: E11
+      name: journal_t / struct journal_s
+      type: struct
+      description: >
+        JBD2 journal control structure (include/linux/jbd2.h:763).
+        Contains: j_running_transaction, j_committing_transaction,
+        j_checkpoint_transactions, j_state_lock, j_commit_wait,
+        j_blocksize, j_fs_dev, j_devname. One per mounted ext4.
+      PROV:
+        - include/linux/jbd2.h:L763-L843
+
+    - id: E12
+      name: transaction_t (JBD2)
+      type: struct
+      description: >
+        JBD2 transaction descriptor (include/linux/jbd2.h).
+        States: T_RUNNING (accepting new handles), T_LOCKED (locked,
+        preparing commit), T_FLUSH, T_COMMIT, T_COMMIT_DFLUSH,
+        T_COMMIT_JFLUSH, T_COMMIT_DONE, T_FINISHED.
+        Contains: t_handle_count, t_state, t_tid, t_buffers list.
+      PROV:
+        - include/linux/jbd2.h:L583-L660
+
+    - id: E13
+      name: handle_t / struct jbd2_journal_handle
+      type: struct
+      description: >
+        JBD2 handle tracking (include/linux/jbd2.h:439).
+        Each handle tracks a single atomic journal operation.
+        Contains: h_transaction (parent transaction), h_ref (ref count),
+        h_owner (current task), h_buffer_credits (remaining credits),
+        h_start_jiffies. Allocated by jbd2_journal_start().
+      PROV:
+        - include/linux/jbd2.h:L439-L475
+
+    - id: E14
+      name: kjournald2 / jbd2_journal_commit_transaction
+      type: function
+      description: >
+        JBD2 commit daemon (fs/jbd2/commit.c).
+        Woken by jbd2_journal_stop() when transaction needs commit.
+        Main loop: T_LOCKED (block new handles) → T_FLUSH (flush
+        journal) → T_COMMIT (write data + journal blocks to disk) →
+        T_COMMIT_DONE → T_FINISHED. Updates checkpoint list.
+      PROV:
+        - fs/jbd2/commit.c:L380-L620
+
+  Relationships:
+    - id: R1
+      source: VFS write syscall
+      target: ext4_file_write_iter
+      type: dispatches
+      description: "ksys_write() → vfs_write() → new_sync_write() → file->f_op->write_iter → ext4_file_write_iter()"
+      PROV:
+        - fs/ext4/file.c:L130-L150
+
+    - id: R2
+      source: ext4_file_write_iter
+      target: generic_perform_write
+      type: calls
+      description: "For buffered writes (non-O_DIRECT), ext4_file_write_iter calls generic_file_write_iter → generic_perform_write."
+      PROV:
+        - mm/filemap.c:L2820-L2865
+
+    - id: R3
+      source: generic_perform_write
+      target: ext4_write_begin
+      type: iterates
+      description: "generic_perform_write loop: for each folio, calls mapping->a_ops->write_begin → ext4_write_begin(). Starts journal handle."
+      PROV:
+        - mm/filemap.c:L2830-L2840
+        - fs/ext4/inode.c:L1288-L1348
+
+    - id: R4
+      source: generic_perform_write
+      target: ext4_write_end
+      type: iterates
+      description: "After copy_from_user, generic_perform_write calls mapping->a_ops->write_end → ext4_write_end(). Stops journal handle."
+      PROV:
+        - mm/filemap.c:L2845-L2860
+        - fs/ext4/inode.c:L1439-L1506
+
+    - id: R5
+      source: ext4_write_begin
+      target: __ext4_journal_start
+      type: calls
+      description: "ext4_write_begin() calls ext4_journal_start() (macro → __ext4_journal_start) to start a JBD2 handle before modifying blocks."
+      PROV:
+        - fs/ext4/inode.c:L1310-L1370
+        - fs/ext4/ext4_jbd2.h:L225-L237
+
+    - id: R6
+      source: __ext4_journal_start
+      target: jbd2_journal_start
+      type: calls
+      description: "__ext4_journal_start() allocates handle via jbd2_journal_start(). Returns handle_t for the running transaction."
+      PROV:
+        - fs/jbd2/transaction.c:L539-L560
+
+    - id: R7
+      source: ext4_write_end
+      target: jbd2_journal_stop
+      type: calls
+      description: "ext4_write_end() calls ext4_journal_stop() which calls jbd2_journal_stop() to release the handle."
+      PROV:
+        - fs/ext4/inode.c:L1490-L1490
+
+    - id: R8
+      source: jbd2_journal_stop
+      target: transaction_t
+      type: decrements_handle_count
+      description: "jbd2_journal_stop() decrements t_handle_count. When count reaches 0 and handle requested commit, wakes commit thread."
+      PROV:
+        - fs/jbd2/transaction.c:L1888-L1950
+
+    - id: R9
+      source: balance_dirty_pages
+      target: writeback_control
+      type: triggers
+      description: "When dirty page count exceeds background threshold, balance_dirty_pages() triggers writeback via wb_start_background_writeback() or throttles the writer."
+      PROV:
+        - mm/page-writeback.c:L1206-L1290
+
+    - id: R10
+      source: writeback_control
+      target: ext4_writepages
+      type: invokes
+      description: "Writeback infrastructure calls mapping->a_ops->writepages(wbc) → ext4_writepages()."
+      PROV:
+        - fs/ext4/inode.c:L3026-L3054
+
+    - id: R11
+      source: jbd2_journal_commit_transaction
+      target: transaction_t
+      type: transitions_state
+      description: "Commit thread advances transaction state: T_RUNNING → T_LOCKED → T_FLUSH → T_COMMIT → T_COMMIT_DONE → T_FINISHED."
+      PROV:
+        - fs/jbd2/commit.c:L380-L620
+
+    - id: R12
+      source: jbd2_journal_start
+      target: journal_t
+      type: accesses
+      description: "jbd2_journal_start() reads journal->j_running_transaction. If NULL, creates new transaction."
+      PROV:
+        - fs/jbd2/transaction.c:L539-L560
+
+  Constraints:
+    - id: C1
+      applies_to: jbd2_journal_start
+      description: "jbd2_journal_start() must not be called in atomic context (can sleep). nblocks must not exceed journal->j_max_transaction_buffers."
+      PROV:
+        - fs/jbd2/transaction.c:L539-L560
+
+    - id: C2
+      applies_to: jbd2_journal_stop
+      description: "jbd2_journal_stop() may trigger a transaction commit if this is the last handle and T_LOCKED requested. Must be called in a context where sleeping is allowed."
+      PROV:
+        - fs/jbd2/transaction.c:L1888-L1950
+
+    - id: C3
+      applies_to: ext4_write_begin
+      description: "ext4_write_begin() must grab the folio before starting the journal handle (to avoid deadlock with writeback). Returns with folio locked and handle active."
+      PROV:
+        - fs/ext4/inode.c:L1323-L1333
+
+    - id: C4
+      applies_to: balance_dirty_pages
+      description: "balance_dirty_pages() may sleep. Writer is throttled proportionally to how far dirty pages exceed the background threshold."
+      PROV:
+        - mm/page-writeback.c:L1206-L1290
+
+    - id: C5
+      applies_to: jbd2_journal_commit_transaction
+      description: "Commit is atomic: either all journal blocks in the transaction are written, or none. On crash before commit completes, journal replay restores consistent state."
+      PROV:
+        - fs/jbd2/commit.c:L380-L620
+
+  Mechanisms:
+    - id: M1
+      name: BufferedWritePath
+      description: "write() → ext4_file_write_iter → generic_perform_write loop: write_begin (start handle + lock folio) → copy_from_user → write_end (mark dirty + stop handle)."
+      chain:
+        - step: "Syscall enters VFS"
+          entity: ksys_write
+          action: "ksys_write(fd, buf, count) → vfs_write → file->f_op->write_iter → ext4_file_write_iter."
+          PROV:
+            - fs/read_write.c:L705-L720
+        - step: "Write loop begins"
+          entity: generic_perform_write
+          action: "For each page-aligned region: call a_ops->write_begin with offset and length."
+          PROV:
+            - mm/filemap.c:L2820-L2835
+        - step: "ext4_write_begin: folio + journal"
+          entity: ext4_write_begin
+          action: "write_begin_get_folio (lock folio, allocate if missing). ext4_journal_start → jbd2_journal_start (get handle from running transaction). create_empty_buffers if needed."
+          PROV:
+            - fs/ext4/inode.c:L1288-L1348
+        - step: "Data copied to folio"
+          entity: generic_perform_write
+          action: "copy_page_from_iter_atomic (copy user data into folio buffer)."
+          PROV:
+            - mm/filemap.c:L2840-L2845
+        - step: "ext4_write_end: commit to journal"
+          entity: ext4_write_end
+          action: "block_write_end (write data to buffers). ext4_update_inode_size. ext4_mark_inode_dirty. ext4_journal_stop → jbd2_journal_stop (release handle)."
+          PROV:
+            - fs/ext4/inode.c:L1439-L1506
+      effects:
+        - entity: struct folio
+          change:
+            from: Clean or non-existent
+            to: Dirty (folio dirty flag set, added to transaction's t_buffers)
+          PROV:
+            - mm/filemap.c:L2840-L2845
+        - entity: transaction_t t_handle_count
+          change:
+            from: Previous count
+            to: Decremented (handle closed)
+          PROV:
+            - fs/jbd2/transaction.c:L1888-L1950
+      constraints:
+        - C1
+        - C3
+        - C4
+      PROV:
+        - mm/filemap.c:L2820-L2865
+        - fs/ext4/inode.c:L1288-L1506
+        - fs/jbd2/transaction.c:L539-L560
+        - fs/jbd2/transaction.c:L1888-L1950
+
+    - id: M2
+      name: JournalCommitLifecycle
+      description: "jbd2_journal_stop (last handle) → wake commit thread → T_LOCKED → T_FLUSH → T_COMMIT → checkpoint. The JBD2 transaction commit cycle."
+      chain:
+        - step: "Commit triggered"
+          entity: jbd2_journal_stop
+          action: "Last handle released on transaction. If T_LOCKED flag set or t_handle_count == 0: wake j_commit_wait."
+          PROV:
+            - fs/jbd2/transaction.c:L1888-L1950
+        - step: "Transaction locked"
+          entity: jbd2_journal_commit_transaction
+          action: "Set state T_LOCKED. Block new handles from joining this transaction. Remove from journal->j_running_transaction. Start new running transaction."
+          PROV:
+            - fs/jbd2/commit.c:L380-L420
+        - step: "Journal flush"
+          entity: jbd2_journal_commit_transaction
+          action: "T_FLUSH: write descriptor blocks and data blocks to journal. T_COMMIT: write commit block (atomically marks transaction complete)."
+          PROV:
+            - fs/jbd2/commit.c:L450-L550
+        - step: "Checkpoint"
+          entity: jbd2_journal_commit_transaction
+          action: "T_COMMIT_DONE: journal blocks written. T_FINISHED: move to checkpoint list. Data blocks may still need flushing to final location."
+          PROV:
+            - fs/jbd2/commit.c:L560-L620
+      effects:
+        - entity: transaction_t.state
+          change:
+            from: T_RUNNING
+            to: T_LOCKED → T_FLUSH → T_COMMIT → T_COMMIT_DONE → T_FINISHED
+          PROV:
+            - fs/jbd2/commit.c:L380-L620
+      constraints:
+        - C2
+        - C5
+      PROV:
+        - fs/jbd2/transaction.c:L1888-L1950
+        - fs/jbd2/commit.c:L380-L620
+
+    - id: M3
+      name: PageWriteback
+      description: "balance_dirty_pages (throttle writer) → writeback thread → ext4_writepages → ext4_do_writepages → submit_bio. What flushes dirty pages to disk."
+      chain:
+        - step: "Dirty threshold exceeded"
+          entity: balance_dirty_pages
+          action: "Called from write() path. If dirty + writeback > dirty_ratio, sleep proportionally. If background threshold exceeded, wake background writeback."
+          PROV:
+            - mm/page-writeback.c:L1206-L1290
+        - step: "Writeback invoked"
+          entity: writeback_control
+          action: "Kernel writeback daemon or sync() sets wbc.sync_mode, nr_to_write. Calls a_ops->writepages."
+          PROV:
+            - include/linux/writeback.h:L52-L85
+        - step: "ext4 writepages"
+          entity: ext4_writepages
+          action: "ext4_do_writepages: scan dirty folios in the mapping, map blocks via ext4_map_blocks, construct bio, call submit_bio_noacct()."
+          PROV:
+            - fs/ext4/inode.c:L3026-L3054
+      effects:
+        - entity: struct folio
+          change:
+            from: Dirty
+            to: Clean (writeback complete, PG_writeback cleared)
+          PROV:
+            - mm/page-writeback.c:L1206-L1290
+      constraints:
+        - C4
+      PROV:
+        - mm/page-writeback.c:L1206-L1290
+        - fs/ext4/inode.c:L3026-L3054
+
+  MissingScope:
+    - topic: "ext4 data=ordered vs data=writeback vs data=journal modes"
+      reason: "The ordered mode (default) journals only metadata, not data blocks. Data=journal journals everything. This affects write_begin/write_end and journal lifecycle."
+      required_for: "Complete understanding of ext4 consistency guarantees"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does ext4 data=ordered mode differ from data=writeback and data=journal in the write path?"
+          scope: module-scoped
+          strictness: minimal
+          target:
+            - "fs/ext4/inode.c (ext4_write_begin, ext4_journalled_write_end)"
+            - "fs/ext4/super.c"
+        Missing because:
+          - "Current slice covers generic write_begin/end only"
+
+    - topic: "Block allocation (ext4_map_blocks, ext4_alloc_blocks)"
+      reason: "Writing to a new or sparse file requires block allocation. This is a significant subsystem (extents, mballoc)."
+      required_for: "Complete write path when allocating new blocks"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does ext4 allocate disk blocks during write?"
+          scope: module-scoped
+          strictness: minimal
+          target:
+            - "fs/ext4/extents.c"
+            - "fs/ext4/mballoc.c"
+        Missing because:
+          - "Current slice assumes blocks are already mapped (overwrite scenario)"
+
+    - topic: "ext4_fsync implementation"
+      reason: "fsync() forces a journal commit. The interaction between filemap_write_and_wait and journal commit is important."
+      required_for: "Data durability semantics"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does ext4_fsync() work?"
+          scope: path-scoped
+          strictness: minimal
+          target:
+            - "fs/ext4/fsync.c"
+        Missing because:
+          - "Current slice ends at writeback; fsync adds journal commit on top"
+
+  Coverage:
+    Included:
+      - target: mm/filemap.c
+        reason: "generic_perform_write — the buffered write loop"
+      - target: fs/ext4/inode.c
+        reason: "ext4_write_begin, ext4_write_end, ext4_writepages"
+      - target: fs/ext4/file.c
+        reason: "ext4_file_write_iter — VFS dispatch"
+      - target: fs/ext4/ext4_jbd2.h
+        reason: "__ext4_journal_start macro / inline"
+      - target: fs/jbd2/transaction.c
+        reason: "jbd2_journal_start, jbd2_journal_stop"
+      - target: fs/jbd2/commit.c
+        reason: "jbd2_journal_commit_transaction"
+      - target: include/linux/jbd2.h
+        reason: "journal_t, transaction_t, handle_t definitions"
+      - target: include/linux/writeback.h
+        reason: "writeback_control struct"
+      - target: mm/page-writeback.c
+        reason: "balance_dirty_pages"
+    Excluded:
+      - target: fs/ext4/extents.c
+        reason: "Block allocation details — excluded by MissingScope"
+      - target: fs/ext4/mballoc.c
+        reason: "Multi-block allocator — allocation scope only"
+      - target: fs/ext4/fsync.c
+        reason: "fsync is a separate mechanism"
+      - target: mm/page-io.c
+        reason: "Swap-specific writeback, not file writeback"

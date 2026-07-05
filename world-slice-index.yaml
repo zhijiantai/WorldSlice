@@ -1,0 +1,141 @@
+metadata:
+  title: "Linux Kernel World Slice — 分層世界模型"
+  version: "1.0"
+  generated: "2026-07-04"
+  git_commit: "e9019fcafe0040228b8631c30f97ae1adb61bcdc"
+  git_tag: "v2.55.0"
+
+design_purpose: >
+  World Slice 是從原始碼中提取的最小可推理世界模型，
+  目的是讓 AI（或其他工程師）不需讀完整份原始碼就能回答關於該子系統的設計問題。
+  每個 WS = entities + relationships + constraints + mechanisms + provenance。
+  本 index 管理 Linux kernel 全部分層 WS，選擇以 H2 (Layered by Subsystem) 方案建構。
+
+linux_version: "Linux 7.2-rc1"
+total_c_files: 63768
+total_dirs: 4229
+total_symbols: 308824
+
+compression_summary:
+  total_source_lines: "~63768 (files, each avg ~500 lines ≈ 32M LoC)"
+  total_ws_lines: 3557
+  avg_compression_ratio: "1:9000+ (source lines : WS lines)"
+  note: "每個 WS 只提取 ~1-3 個子系統的關鍵架構，非全量分析"
+
+ws_inventory:
+  completed:
+    - id: ws-minimal-linux
+      file: ws-minimal-linux.yaml
+      lines: 654
+      source_target: "kernel/ (640), mm/ (190), init/ (13) — boot + scheduler + MM core"
+      source_files: 843
+      compression_ratio: "1:~600"
+      demo_focus: "Boot sequence + sched + MM — 三核心子系統的完整 call stack"
+
+    - id: ws-init
+      file: ws-init.yaml
+      lines: 528
+      source_target: "init/main.c + kernel/sched/core.c — start_kernel → PID 1"
+      source_files: 13
+      compression_ratio: "1:~12"
+      demo_focus: "完整開機流程追蹤 — 從 arch boot 到 init 執行"
+
+    - id: ws-locking
+      file: ws-locking.yaml
+      lines: 399
+      source_target: "include/linux/spinlock.h, mutex.h, rwsem.h + kernel/locking/"
+      source_files: "~50"
+      compression_ratio: "1:~60"
+      demo_focus: "同步原語對比 — spinlock vs mutex vs rwsem 決策樹"
+
+    - id: ws-rcu
+      file: ws-rcu.yaml
+      lines: 371
+      source_target: "kernel/rcu/ + include/linux/rcupdate.h + rcuref.h"
+      source_files: "~40"
+      compression_ratio: "1:~50"
+      demo_focus: "RCU 機制 — read-side + grace period + callbacks"
+
+    - id: ws-vfs-block
+      file: ws-vfs-block.yaml
+      lines: 502
+      source_target: "fs/read_write.c + mm/filemap.c + block/blk-core.c — VFS read path"
+      source_files: "~100"
+      compression_ratio: "1:~90"
+      demo_focus: "跨子系統資料流 — syscall → VFS → page cache → block layer"
+
+    - id: ws-fs
+      file: ws-fs.yaml
+      lines: 527
+      source_target: "fs/ext4/ + fs/jbd2/ + mm/page-writeback.c"
+      source_files: "~200"
+      compression_ratio: "1:~150"
+      demo_focus: "ext4 buffered write — JBD2 journal + page writeback 路徑"
+
+    - id: ws-net
+      file: ws-net.yaml
+      lines: 576
+      source_target: "net/ipv4/ + net/core/ + include/net/ — TCP socket lifecycle"
+      source_files: "~300"
+      compression_ratio: "1:~200"
+      demo_focus: "TCP/IPv4 — socket create → connect → send → close"
+
+  summary:
+    total_ws_lines: 3557
+    completed_count: 7
+
+design_principles:
+  - "Monolithic but Modular: single kernel image, clear subsystem boundaries via documented APIs"
+  - "No Stable Internal API: subsystems can change internal APIs between versions"
+  - "Tight Coupling at Core: kernel/ and mm/ share deep data structures (mm_struct, task_struct)"
+  - "Loose Coupling at Periphery: fs/, net/, drivers/ have well-defined interface layers"
+  - "include/linux/ Is The Contract: shared headers define API contracts between subsystems"
+
+demo_strategy: >
+  展示 4 個 WS，每個代表不同分析深度：
+  1. ws-init.yaml — 開機流程追蹤（call stack 深度）
+  2. ws-net.yaml — TCP socket 生命周期（跨子系統資料流）
+  3. ws-locking.yaml — 同步機制決策（原語對比）
+  4. ws-fs.yaml — 儲存路徑（ext4 + journal + writeback）
+  其餘 WS 在 MissingScope/roadmap 中列出，demo 時一句話帶過。
+
+missing_scope:
+  - module: arch/x86
+    files: 1157
+    priority: medium
+    reason: "x86 specific MMU setup, syscall entry, interrupt handling"
+  
+  - module: block (full)
+    files: 98
+    priority: medium
+    reason: "I/O scheduling, multi-queue, drivers aside from the read path already covered"
+  
+  - module: security (LSM)
+    files: 263
+    priority: low
+    reason: "SELinux, AppArmor hooks — orthogonal to core architecture demo"
+
+  - module: ipc
+    files: 12
+    priority: low
+    reason: "System V IPC, POSIX message queues — legacy, minimal architectural impact"
+  
+  - module: crypto
+    files: 166
+    priority: low
+    reason: "skcipher, aead, hash — well-defined API surface, low cross-subsystem coupling"
+  
+  - module: lib
+    files: 737
+    priority: low
+    reason: "list, rbtree, xarray — utility data structures, referenced by all WS but not primary subject"
+  
+  - module: drivers (device model)
+    files: 33835
+    priority: very_low
+    reason: "Driver model architecture (bus/driver/device), not per-driver details"
+  
+  - module: include/
+    files: 6662
+    priority: very_low
+    reason: "Shared header surface — implicitly covered by each WS's own provenance"

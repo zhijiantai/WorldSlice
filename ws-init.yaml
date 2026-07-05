@@ -1,0 +1,528 @@
+# Linux Kernel Boot Flow World Slice v1.0
+# Expansion from ws-minimal-linux.yaml — covers start_kernel → rest_init → PID 1
+# Source: Linux 7.2-rc1
+
+WorldSlice:
+
+  Metadata:
+    question: "Linux kernel boot flow: from start_kernel to user-space init"
+    normalized_objective: "Cover the exact call chain from start_kernel() through subsystem initialization, rest_init(), kernel_init_freeable(), do_basic_setup(), to run_init_process()."
+    scope: module-scoped
+    strictness: minimal
+    source_repo: "Linux 7.2-rc1 — ~/Documents/code/linux/"
+    non_goals:
+      - "Do not cover arch-specific boot code (setup_arch, head.S, bootloader)"
+      - "Do not cover driver initialization details inside do_initcalls"
+      - "Do not cover initramfs or initrd inner workings"
+      - "Do not cover suspend/resume or kexec boot paths"
+      - "Do not cover kernel module loading"
+
+  ConsumerInstructions:
+    reasoning_boundary:
+      - "Treat this World Slice as complete for the kernel boot sequence from start_kernel to user-space init."
+      - "Use only facts supported by provenance."
+      - "Do not invent missing init calls, state transitions, or fallback paths."
+      - "Separate Observation, Assumption, and Conclusion."
+    insufficient_scope_behavior:
+      - "Stop when the World Slice is insufficient."
+      - "Identify the exact missing information."
+      - "Explain why the missing information is required."
+      - "Form a copy-ready Scope Expansion Query."
+      - "Do not continue by guessing."
+    response_style:
+      name: "Technician Caveman"
+      rules:
+        - "Use short sentences."
+        - "Preserve technical terms."
+        - "Prefer A → B → C causal chains."
+        - "Prefer execution flow over essay prose."
+        - "Avoid marketing language."
+        - "State uncertainty explicitly."
+    uncertainty_format:
+      marker: "[Uncertain]"
+      behavior:
+        - "State what is unknown."
+        - "State what evidence is missing."
+        - "Produce a Scope Expansion Query."
+    expansion_query_template: |
+      WORLD_SLICE_REQUEST:
+        question: "<specific unresolved question>"
+        scope: "<workspace-scoped|module-scoped|path-scoped>"
+        strictness: minimal
+        target:
+          - "<smallest missing module, path, symbol, mechanism, API, or data format>"
+      Missing because:
+        - "<current World Slice lacks required fact>"
+        - "<answer depends on missing evidence>"
+
+  Entities:
+    - id: E1
+      name: start_kernel
+      type: function
+      description: >
+        Kernel entry point (init/main.c:972). Called by arch boot code
+        (e.g. x86 startup_64). Sets up traps, IRQs, early console, memory
+        manager, scheduler, then calls rest_init(). Runs with IRQs disabled
+        until early_boot_irqs_disabled is cleared (L1102).
+      PROV:
+        - init/main.c:L972-L1184
+
+    - id: E2
+      name: rest_init
+      type: function
+      description: >
+        Called at the end of start_kernel() (init/main.c:671).
+        Spawns kernel_init thread (PID 1) via user_mode_thread(), spawns
+        kthreadd (PID 2) via kernel_thread(), sets system_state to
+        SYSTEM_SCHEDULING, then calls schedule_preempt_disabled() and
+        cpu_startup_entry() to enter the idle loop.
+      PROV:
+        - init/main.c:L671-L718
+
+    - id: E3
+      name: kernel_init
+      type: function
+      description: >
+        Kernel init thread entry (init/main.c:1539). Waits for kthreadd_done
+        completion, calls kernel_init_freeable(), frees initmem, marks
+        kernel memory read-only, then attempts to execute the user-space
+        init binary. Runs the boot-time init process.
+      PROV:
+        - init/main.c:L1539-L1612
+
+    - id: E4
+      name: kernel_init_freeable
+      type: function
+      description: >
+        Core kernel initialization that can sleep/allocate (init/main.c:1629).
+        Enables full GFP mask, initializes SMP (smp_prepare_cpus, smp_init),
+        workqueues, scheduling SMP topology, sets up device drivers and
+        filesystems via do_basic_setup(), mounts rootfs, and loads integrity
+        keys.
+      PROV:
+        - init/main.c:L1629-L1689
+
+    - id: E5
+      name: do_basic_setup
+      type: function
+      description: >
+        Runs driver and subsystem initcalls (init/main.c:1438).
+        Calls cpuset_init_smp(), ksysfs_init(), driver_init(),
+        init_irq_proc(), do_ctors(), then do_initcalls(). This is where
+        all built-in drivers and filesystems register themselves.
+      PROV:
+        - init/main.c:L1438-L1446
+
+    - id: E6
+      name: do_initcalls
+      type: function
+      description: >
+        Runs all registered initcall functions in priority order
+        (init/main.c:1412). Levels in order: pure, core, postcore, arch,
+        subsys, fs, device, late. Each level processes all its function
+        pointers via do_one_initcall().
+      PROV:
+        - init/main.c:L1412-L1429
+
+    - id: E7
+      name: do_one_initcall
+      type: function
+      description: >
+        Executes a single initcall function (init/main.c:1337).
+        Checks initcall_blacklist, calls the function, detects preemption
+        or IRQ imbalances, and warns on violations.
+      PROV:
+        - init/main.c:L1337-L1364
+
+    - id: E8
+      name: run_init_process
+      type: function
+      description: >
+        Executes a user-space binary as PID 1 (init/main.c:1457).
+        Calls kernel_execve() with argv_init and envp_init. Replaces
+        the kernel_init thread's address space with the init program.
+        Never returns on success.
+      PROV:
+        - init/main.c:L1457-L1470
+
+    - id: E9
+      name: try_to_run_init_process
+      type: function
+      description: >
+        Wraps run_init_process() with error handling (init/main.c:1472).
+        Returns -errno on failure. Logs errors for existing binaries that
+        fail to execute.
+      PROV:
+        - init/main.c:L1472-L1484
+
+    - id: E10
+      name: system_state (enum)
+      type: variable
+      description: >
+        Global state machine for kernel boot phases (init/main.c:133).
+        Transitions: unset → SYSTEM_FREEING_INITMEM → SYSTEM_RUNNING.
+        Also marked at rest_init: SYSTEM_SCHEDULING (L707).
+        Controls what operations are allowed at each boot phase.
+      PROV:
+        - init/main.c:L133-L134
+        - init/main.c:L707-L707
+        - init/main.c:L1552-L1566
+
+    - id: E11
+      name: early_boot_irqs_disabled
+      type: variable
+      description: >
+        Flag set true at the start of start_kernel() (init/main.c:985).
+        Cleared after timekeeping, interrupts, and console are initialized
+        (L1102). While true, IRQs remain disabled and only the boot CPU
+        is active.
+      PROV:
+        - init/main.c:L131-L131
+        - init/main.c:L985-L985
+        - init/main.c:L1102-L1103
+
+    - id: E12
+      name: initcall_levels[]
+      type: array
+      description: >
+        Ordered array of initcall level boundaries (init/main.c:1367).
+        8 levels: pure → core → postcore → arch → subsys → fs → device → late.
+        Each entry is a pointer to the start of that level's section in the
+        linked-in __initcall section.
+      PROV:
+        - init/main.c:L1367-L1377
+
+    - id: E13
+      name: rest_init idle loop
+      type: entity
+      description: >
+        After spawning kernel_init and kthreadd, rest_init() calls
+        cpu_startup_entry(CPUHP_ONLINE) which enters the idle loop.
+        The idle task (PID 0) runs when no other task is schedulable.
+      PROV:
+        - init/main.c:L715-L718
+
+    - id: E14
+      name: kthreadd (PID 2)
+      type: entity
+      description: >
+        Kernel thread daemon. Spawned by rest_init() via kernel_thread()
+        (init/main.c:695). Creates all other kernel threads on demand.
+        kernel_init waits for kthreadd_done before proceeding through
+        kernel_init_freeable().
+      PROV:
+        - init/main.c:L695-L698
+        - init/main.c:L1546-L1546
+
+    - id: E15
+      name: ramdisk_execute_command
+      type: variable
+      description: >
+        Path to the initramfs init binary (init/main.c:167).
+        Default: \"/init\". Can be overridden via rdinit= kernel parameter.
+        If accessible, kernel_init runs it first; otherwise falls back
+        to prepare_namespace() for rootfs mount, then tries execute_command,
+        CONFIG_DEFAULT_INIT, /sbin/init, /etc/init, /bin/init, /bin/sh.
+      PROV:
+        - init/main.c:L167-L168
+        - init/main.c:L1573-L1611
+
+    - id: E16
+      name: execute_command
+      type: variable
+      description: >
+        Path set by the init= kernel boot parameter (init/main.c:166).
+        If set and valid, kernel_init runs this instead of the default
+        fallback chain. On failure, kernel panics.
+      PROV:
+        - init/main.c:L166-L166
+        - init/main.c:L1587-L1592
+
+  Relationships:
+    - id: R1
+      source: start_kernel
+      target: rest_init
+      type: calls
+      description: "start_kernel() ends by calling rest_init() which spawns PID 1 and PID 2, then enters the idle loop."
+      PROV:
+        - init/main.c:L1175-L1175
+
+    - id: R2
+      source: start_kernel
+      target: mm_core_init_early
+      type: calls
+      description: "start_kernel() calls mm_core_init_early() to set up free_area_init() (zone/page structures)."
+      PROV:
+        - init/main.c:L995-L995
+
+    - id: R3
+      source: start_kernel
+      target: mm_core_init
+      type: calls
+      description: "start_kernel() calls mm_core_init() to complete memory manager init (buddy allocator, kmem_cache, vmalloc)."
+      PROV:
+        - init/main.c:L1034-L1034
+
+    - id: R4
+      source: start_kernel
+      target: sched_init
+      type: calls
+      description: "start_kernel() calls sched_init() to initialize per-CPU runqueues and scheduler classes."
+      PROV:
+        - init/main.c:L1047-L1047
+
+    - id: R5
+      source: start_kernel
+      target: early_boot_irqs_disabled
+      type: sets
+      description: "start_kernel() sets early_boot_irqs_disabled = true at L985, clears it at L1102 after timekeeping and console init."
+      PROV:
+        - init/main.c:L985-L985
+        - init/main.c:L1102-L1102
+
+    - id: R6
+      source: rest_init
+      target: kernel_init
+      type: spawns
+      description: "rest_init() creates PID 1 via user_mode_thread(kernel_init, ...). kernel_init is the first user-space process."
+      PROV:
+        - init/main.c:L682-L682
+
+    - id: R7
+      source: rest_init
+      target: kthreadd
+      type: spawns
+      description: "rest_init() creates PID 2 via kernel_thread(kthreadd, ...). kthreadd creates all other kernel threads."
+      PROV:
+        - init/main.c:L695-L695
+
+    - id: R8
+      source: kernel_init
+      target: kernel_init_freeable
+      type: calls
+      description: "kernel_init() first calls kernel_init_freeable() to complete subsystem initialization (SMP, drivers, fs, rootfs)."
+      PROV:
+        - init/main.c:L1548-L1548
+
+    - id: R9
+      source: kernel_init_freeable
+      target: do_basic_setup
+      type: calls
+      description: "kernel_init_freeable() calls do_basic_setup() which runs all driver and filesystem initcalls."
+      PROV:
+        - init/main.c:L1658-L1658
+
+    - id: R10
+      source: do_basic_setup
+      target: do_initcalls
+      type: calls
+      description: "do_basic_setup() calls do_initcalls() to iterate and execute all registered initcall levels."
+      PROV:
+        - init/main.c:L1445-L1445
+
+    - id: R11
+      source: do_initcalls
+      target: do_one_initcall
+      type: iterates
+      description: "do_initcalls() loops over each level, calling do_one_initcall() for each function pointer in that level."
+      PROV:
+        - init/main.c:L1408-L1409
+
+    - id: R12
+      source: kernel_init
+      target: run_init_process
+      type: calls
+      description: "After initmem freed, kernel_init() calls run_init_process() to execute the user-space init binary."
+      PROV:
+        - init/main.c:L1574-L1574
+
+    - id: R13
+      source: kernel_init
+      target: system_state
+      type: transitions
+      description: "kernel_init() sets system_state = SYSTEM_FREEING_INITMEM (L1552), then SYSTEM_RUNNING (L1566) after freeing initmem."
+      PROV:
+        - init/main.c:L1552-L1552
+        - init/main.c:L1566-L1566
+
+    - id: R14
+      source: rest_init
+      target: system_state
+      type: transitions
+      description: "rest_init() sets system_state = SYSTEM_SCHEDULING (L707) after spawning kthreadd."
+      PROV:
+        - init/main.c:L707-L707
+
+    - id: R15
+      source: do_basic_setup
+      target: do_ctors
+      type: calls
+      description: "do_basic_setup() calls do_ctors() to execute all constructor functions in the .init section."
+      PROV:
+        - init/main.c:L1444-L1444
+
+  Constraints:
+    - id: C1
+      applies_to: start_kernel
+      description: "start_kernel() must be called with IRQs disabled. It re-enables them after timekeeping and console init."
+      PROV:
+        - init/main.c:L984-L985
+        - init/main.c:L1102-L1103
+
+    - id: C2
+      applies_to: rest_init
+      description: "rest_init() must be the last function called by start_kernel(). After rest_init, the boot CPU enters the idle loop. IRQs must be enabled before rest_init."
+      PROV:
+        - init/main.c:L1175-L1175
+
+    - id: C3
+      applies_to: kernel_init
+      description: "kernel_init must wait for kthreadd_done before calling kernel_init_freeable(). This ensures kthreadd is ready to service kernel thread creation requests."
+      PROV:
+        - init/main.c:L1546-L1546
+
+    - id: C4
+      applies_to: initcall ordering
+      description: "Initcalls run in strict level order: pure → core → postcore → arch → subsys → fs → device → late. Dependencies must respect this ordering."
+      PROV:
+        - init/main.c:L1367-L1389
+
+    - id: C5
+      applies_to: run_init_process
+      description: "run_init_process() does not return on success (kernel_execve replaces the process). On failure it returns -errno. kernel_init() tries multiple fallback init paths before panicking."
+      PROV:
+        - init/main.c:L1457-L1470
+        - init/main.c:L1604-L1611
+
+    - id: C6
+      applies_to: kernel_init_freeable
+      description: "smp_init() must be called before sched_init_smp(). do_basic_setup() must run after SMP is online."
+      PROV:
+        - init/main.c:L1650-L1651
+        - init/main.c:L1658-L1658
+
+  Mechanisms:
+    - id: M1
+      name: BootSequence
+      description: "Arch boot code → start_kernel() → subsystem init → rest_init() → kernel_init → kernel_init_freeable → do_basic_setup → init binary. The complete kernel bootstrap."
+      chain:
+        - step: "start_kernel() entry"
+          entity: start_kernel
+          action: "IRQs disabled. Set early_boot_irqs_disabled. smp_setup_processor_id, setup_arch, mm_core_init_early, jump_label_init, early_security_init."
+          PROV:
+            - init/main.c:L972-L1010
+        - step: "Command line parsing"
+          entity: start_kernel
+          action: "parse_early_param, parse_args for kernel parameters. random_init_early."
+          PROV:
+            - init/main.c:L1010-L1024
+        - step: "Core subsystem init (memory, traps, scheduler)"
+          entity: start_kernel
+          action: "mm_core_init (buddy + slab + vmalloc), trap_init, sched_init, workqueue_init_early, rcu_init."
+          PROV:
+            - init/main.c:L1034-L1068
+        - step: "Timekeeping and IRQ subsystem"
+          entity: start_kernel
+          action: "early_irq_init, init_IRQ, tick_init, timers_init, hrtimers_init, softirq_init, timekeeping_init. Then: random_init."
+          PROV:
+            - init/main.c:L1078-L1091
+        - step: "IRQs enabled"
+          entity: start_kernel
+          action: "Clear early_boot_irqs_disabled. local_irq_enable(). Console init. lockdep init."
+          PROV:
+            - init/main.c:L1102-L1117
+        - step: "Remaining subsystem init"
+          entity: start_kernel
+          action: "pid_idr_init, anon_vma_init, cred_init, fork_init, proc_caches_init, security_init, vfs_caches_init, cgroup_init, etc."
+          PROV:
+            - init/main.c:L1145-L1170
+        - step: "rest_init spawns the world"
+          entity: rest_init
+          action: "rcu_scheduler_starting. user_mode_thread(kernel_init) → PID 1. kernel_thread(kthreadd) → PID 2. system_state = SYSTEM_SCHEDULING. complete(kthreadd_done). schedule_preempt_disabled() → cpu_startup_entry() (idle loop)."
+          PROV:
+            - init/main.c:L671-L718
+        - step: "kernel_init_freeable (subsystem bringup)"
+          entity: kernel_init_freeable
+          action: "smp_prepare_cpus, workqueue_init, do_pre_smp_initcalls, lockup_detector_init, smp_init, sched_init_smp, do_basic_setup (drivers + filesystems)."
+          PROV:
+            - init/main.c:L1629-L1658
+        - step: "Init binary execution"
+          entity: kernel_init
+          action: "Free initmem. Mark kernel read-only. Try: ramdisk_execute_command → execute_command → CONFIG_DEFAULT_INIT → /sbin/init → /etc/init → /bin/init → /bin/sh. Panic if none work."
+          PROV:
+            - init/main.c:L1539-L1611
+      effects:
+        - entity: system_state
+          change:
+            from: initial (0)
+            to: SYSTEM_SCHEDULING → SYSTEM_FREEING_INITMEM → SYSTEM_RUNNING
+          PROV:
+            - init/main.c:L707-L707
+            - init/main.c:L1552-L1552
+            - init/main.c:L1566-L1566
+        - entity: PID 1 (init)
+          change:
+            from: NonExistent
+            to: Running user-space binary
+          PROV:
+            - init/main.c:L682-L682
+            - init/main.c:L1574-L1574
+      constraints:
+        - C1
+        - C2
+        - C3
+        - C4
+        - C5
+        - C6
+      PROV:
+        - init/main.c:L972-L1184
+        - init/main.c:L671-L718
+        - init/main.c:L1539-L1611
+        - init/main.c:L1629-L1689
+
+  MissingScope:
+    - topic: "Arch-specific boot code (setup_arch, head.S)"
+      reason: "Each architecture has different boot entry. x86: startup_64 → x86_64_start_kernel → start_kernel. ARM64: head.S → __primary_switch → start_kernel."
+      required_for: "Complete understanding from power-on to start_kernel"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does x86_64 transition from UEFI/bootloader to start_kernel()"
+          scope: path-scoped
+          strictness: minimal
+          target:
+            - "arch/x86/kernel/head_64.S"
+            - "arch/x86/kernel/head64.c"
+        Missing because:
+          - "Current slice starts at start_kernel()"
+          - "Arch boot code involves page table setup, long mode transition, and EFI stub"
+
+    - topic: "Initramfs/initrd mounting details"
+      reason: "The interaction between initramfs, populate_rootfs, and prepare_namespace is complex and config-dependent."
+      required_for: "Complete understanding of rootfs availability before init execution"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does the kernel mount rootfs from initramfs vs real block device?"
+          scope: path-scoped
+          strictness: minimal
+          target:
+            - "init/initramfs.c"
+            - "init/do_mounts.c"
+            - "init/do_mounts_rd.c"
+        Missing because:
+          - "Current slice only covers init binary fallback chain"
+
+  Coverage:
+    Included:
+      - target: init/main.c
+        reason: "Full boot sequence: start_kernel, rest_init, kernel_init, kernel_init_freeable, do_basic_setup, initcall system, init binary execution"
+    Excluded:
+      - target: init/initramfs.c
+        reason: "Initramfs decompression and population — not needed for understanding the boot sequence order"
+      - target: init/do_mounts.c
+        reason: "Root device mounting details — called by prepare_namespace() but not a key entity for boot flow"
+      - target: init/calibrate.c
+        reason: "Delay loop calibration — internal detail, not a decision point in the boot flow"
+      - target: init/version.c
+        reason: "Version string generation — trivial, not structurally important"
+      - target: arch/x86/kernel/head_64.S
+        reason: "Arch-specific boot code — excluded by non_goals"

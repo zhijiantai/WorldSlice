@@ -1,0 +1,371 @@
+# Linux RCU World Slice v1.0
+# Expansion from ws-minimal-linux.yaml — covers RCU read-side, grace period, and callbacks
+
+WorldSlice:
+
+  Metadata:
+    question: "Linux RCU如何实现读写并发和grace period"
+    normalized_objective: "Cover RCU read-side critical section (rcu_read_lock/unlock), grace period detection (quiescent states, rcu_gp_init/cleanup), and deferred reclamation (call_rcu, synchronize_rcu)."
+    scope: module-scoped
+    strictness: minimal
+    source_repo: "Linux 7.2-rc1 — ~/Documents/code/linux/"
+    non_goals:
+      - "Do not cover RCU-bh, RCU-sched, RCU-task variants"
+      - "Do not cover expedited grace periods"
+      - "Do not cover NMI/IRQ/NMI handler RCU interaction"
+      - "Do not cover RCU callback offloading (nocb)"
+      - "Do not cover RCU_NOCB_CPU or rcu_barrier"
+
+  ConsumerInstructions:
+    reasoning_boundary:
+      - "Treat this World Slice as complete for basic RCU read-side + grace period + callback lifecycle."
+      - "Do not invent missing RCU flavors, missing QS types, or missing states."
+    insufficient_scope_behavior:
+      - "Stop when insufficient. Form expansion query."
+    response_style:
+      name: "Technician Caveman"
+      rules:
+        - "Short sentences."
+        - "A → B → C causal chains."
+        - "State uncertainty explicitly."
+
+  Entities:
+    - id: E1
+      name: rcu_state (struct rcu_state)
+      type: struct
+      description: >
+        Global RCU state. Contains: gp_seq (grace period sequence number),
+        gp_kthread (kernel task that advances grace periods),
+        gp_flags (commands for GP kthread), gp_state (current state),
+        node[] (rcu_node tree hierarchy). Single instance: rcu_state.
+      PROV:
+        - kernel/rcu/tree.h:L351-L380
+
+    - id: E2
+      name: rcu_node (struct rcu_node)
+      type: struct
+      description: >
+        RCU hierarchy node (tree of nodes). Leaf nodes track per-CPU
+        quiescent state via qsmask (bitmask of CPUs that need to report QS).
+        Internal nodes aggregate QS status from children.
+        Contains: lock (raw_spinlock_t), gp_seq, qsmask, qsmaskinit,
+        blkd_tasks (preemptible RCU blocked tasks), parent pointer.
+      PROV:
+        - kernel/rcu/tree.h:L41-L100
+
+    - id: E3
+      name: rcu_data (struct rcu_data)
+      type: struct
+      description: >
+        Per-CPU RCU data. Contains: gp_seq (tracked GP), cpu_no_qs
+        (no QS yet for this CPU), core_needs_qs (CPU must report QS),
+        mynode (leaf rcu_node), cblist (segmented callback list),
+        grpmask (bit for this CPU in leaf qsmask).
+        One instance per CPU via DEFINE_PER_CPU.
+      PROV:
+        - kernel/rcu/tree.h:L189-L230
+
+    - id: E4
+      name: rcu_read_lock / rcu_read_unlock
+      type: function
+      description: >
+        Enter/exit RCU read-side critical section.
+        PREEMPT_RCU: increments current->rcu_read_lock_nesting.
+        Non-preemptible: preempt_disable().
+        Prevents the RCU grace period from completing while inside.
+        Read-side critical sections may be preempted (on PREEMPT_RCU)
+        but must not explicitly block.
+      PROV:
+        - include/linux/rcupdate.h:L830-L840
+        - kernel/rcu/tree_plugin.h:L386-L405
+
+    - id: E5
+      name: rcu_read_lock_nesting (task_struct field)
+      type: field
+      description: >
+        Per-task nesting depth of rcu_read_lock(). Stored in
+        current->rcu_read_lock_nesting. 0 = no read lock held.
+        > 0 = inside RCU read-side critical section.
+        Used by PREEMPT_RCU to track whether a blocked task
+        is still inside an RCU read-side CS.
+      PROV:
+        - include/linux/rcupdate.h:L91
+        - kernel/rcu/tree_plugin.h:L386-L405
+
+    - id: E6
+      name: rcu_gp_init (grace period init)
+      type: function
+      description: >
+        Start a new grace period. Called by GP kthread.
+        Takes root rcu_node lock. Clears gp_flags. Advances gp_seq.
+        Initializes each rcu_node's qsmask from qsmaskinit.
+        Sets gp_state to indicate GP in progress.
+      PROV:
+        - kernel/rcu/tree.c:L1832-L1870
+
+    - id: E7
+      name: rcu_gp_cleanup (grace period cleanup)
+      type: function
+      description: >
+        End a grace period. Called by GP kthread after all CPUs report QS.
+        Updates gp_end timestamp. Wakes waiters (synchronize_rcu completions).
+        Advances the next pending GP or goes back to sleep.
+      PROV:
+        - kernel/rcu/tree.c:L2178-L2200
+
+    - id: E8
+      name: quiescent state (QS)
+      type: concept
+      description: >
+        A point where a CPU is known not to be in an RCU read-side critical
+        section: context switch (in PREEMPT_RCU), idle, user-mode execution,
+        or explicit rcu_quiet() call. Each CPU must pass through a QS
+        for the grace period to complete. Tracked per-CPU via rcu_data
+        and aggregated via rcu_node qsmask.
+      PROV:
+        - kernel/rcu/tree.h:L41-L100
+
+    - id: E9
+      name: call_rcu / __call_rcu_common
+      type: function
+      description: >
+        Defer a callback until after a grace period. caller: call_rcu(head, func).
+        Places callback on rcu_data->cblist (segmented callback list).
+        The callback will be invoked after all pre-existing RCU readers complete.
+        If no GP in progress, wakes the GP kthread.
+      PROV:
+        - kernel/rcu/tree.c:L3277-L3320
+
+    - id: E10
+      name: synchronize_rcu
+      type: function
+      description: >
+        Synchronous wait for a grace period. Blocks the caller until all
+        pre-existing RCU readers have completed. If no GP in progress,
+        may use polled GP (fast path on UP/SMP w/ PREEMPT).
+        Otherwise: call_rcu_hurry with a completion → wait.
+      PROV:
+        - kernel/rcu/tree.c:L3378-L3410
+
+    - id: E11
+      name: GP kthread (rcu_state.gp_kthread)
+      type: entity
+      description: >
+        Kernel thread (named "rcu_preempt" or "rcu_sched") that drives
+        grace period state machine. Sleeps on rcu_state.gp_wq. Woken by
+        call_rcu() or rcu_report_qs_rdp(). Loop: rcu_gp_init() → wait
+        for QS → rcu_gp_cleanup().
+      PROV:
+        - kernel/rcu/tree.h:L351-L380
+
+    - id: E12
+      name: rcu_sched_clock_irq
+      type: function
+      description: >
+        Called by scheduler tick. Checks if this CPU needs to report a
+        QS (rcu_data->core_needs_qs). If so, records QS, raises softirq
+        to process callbacks, or invokes rcu_report_qs_rdp() directly
+        to propagate QS up the rcu_node tree.
+      PROV:
+        - kernel/rcu/tree.c:L2724
+
+  Relationships:
+    - id: R1
+      source: rcu_read_lock
+      target: rcu_read_lock_nesting
+      type: increments
+      description: "rcu_read_lock() increments current->rcu_read_lock_nesting (or preempt_disable on non-PREEMPT). rcu_read_unlock() decrements."
+      PROV:
+        - kernel/rcu/tree_plugin.h:L386-L405
+
+    - id: R2
+      source: rcu_state
+      target: rcu_node
+      type: contains_tree
+      description: "rcu_state.node[] is an array of rcu_node structs forming a hierarchy. Leaf nodes track per-CPU QS, internal nodes aggregate."
+      PROV:
+        - kernel/rcu/tree.h:L351-L380
+
+    - id: R3
+      source: rcu_node
+      target: rcu_data
+      type: tracks
+      description: "Leaf rcu_node's qsmask bits correspond to per-CPU rcu_data structures. Each rcu_data has mynode pointing to its leaf rcu_node."
+      PROV:
+        - kernel/rcu/tree.h:L41-L100
+        - kernel/rcu/tree.h:L189-L230
+
+    - id: R4
+      source: GP kthread
+      target: rcu_gp_init
+      type: calls
+      description: "GP kthread loop calls rcu_gp_init() to start a grace period."
+      PROV:
+        - kernel/rcu/tree.c:L1832-L1870
+
+    - id: R5
+      source: GP kthread
+      target: rcu_gp_cleanup
+      type: calls
+      description: "GP kthread loop calls rcu_gp_cleanup() once all quiescent states are reported."
+      PROV:
+        - kernel/rcu/tree.c:L2178-L2200
+
+    - id: R6
+      source: quiescent state
+      target: rcu_node
+      type: clears_qsmask
+      description: "When a CPU reports a QS, its bit is cleared from leaf rcu_node's qsmask. When all bits clear → GP complete for that node."
+      PROV:
+        - kernel/rcu/tree.h:L41-L100
+
+    - id: R7
+      source: call_rcu
+      target: rcu_data
+      type: queues_on
+      description: "call_rcu() places the callback on rcu_data->cblist. When no GP in progress, wakes GP kthread to start one."
+      PROV:
+        - kernel/rcu/tree.c:L3277-L3320
+
+    - id: R8
+      source: synchronize_rcu
+      target: call_rcu
+      type: uses
+      description: "synchronize_rcu() uses call_rcu_hurry() with a completion to wait for GP completion."
+      PROV:
+        - kernel/rcu/tree.c:L3378-L3410
+
+    - id: R9
+      source: rcu_sched_clock_irq
+      target: quiescent state
+      type: detects
+      description: "rcu_sched_clock_irq() checks if core_needs_qs. If yes, records QS and propagates up the rcu_node tree."
+      PROV:
+        - kernel/rcu/tree.c:L2724
+
+  Constraints:
+    - id: C1
+      applies_to: rcu_read_lock
+      description: "RCU read-side critical sections must not contain blocking operations (mutex_lock, schedule(), vmalloc, copy_from_user). On PREEMPT_RCU, preemption within is allowed but explicit sleep is not."
+      PROV:
+        - include/linux/rcupdate.h:L830-L840
+
+    - id: C2
+      applies_to: call_rcu
+      description: "call_rcu() may be called from atomic context (including IRQ handlers). The callback itself runs in softirq context (or process context for lazy callbacks)."
+      PROV:
+        - kernel/rcu/tree.c:L3277-L3320
+
+    - id: C3
+      applies_to: synchronize_rcu
+      description: "synchronize_rcu() must not be called from within an RCU read-side critical section (detected by lockdep). May sleep."
+      PROV:
+        - kernel/rcu/tree.c:L3378-L3410
+
+    - id: C4
+      applies_to: quiescent state
+      description: "A CPU that is in an RCU read-side critical section (rcu_read_lock_nesting > 0) cannot report a quiescent state. GP is blocked until all CPUs exit their read-side CS."
+      PROV:
+        - kernel/rcu/tree.h:L41-L100
+
+  Mechanisms:
+    - id: M1
+      name: GracePeriodLifecycle
+      description: "call_rcu() → wake GP kthread → rcu_gp_init() → wait for QS → rcu_gp_cleanup() → invoke callbacks"
+      chain:
+        - step: "Callback enqueued"
+          entity: call_rcu
+          action: "Place (head, func) on rcu_data->cblist. If no GP in progress, set gp_flags and wake GP kthread."
+          PROV:
+            - kernel/rcu/tree.c:L3277-L3320
+        - step: "Grace period start"
+          entity: rcu_gp_init
+          action: "Acquire root rcu_node lock. Advance gp_seq. Initialize all rcu_node qsmask from qsmaskinit. Each CPU must report QS."
+          PROV:
+            - kernel/rcu/tree.c:L1832-L1870
+        - step: "Quiescent state detection"
+          entity: rcu_sched_clock_irq
+          action: "Per-CPU tick: if core_needs_qs, record QS. Call rcu_report_qs_rdp() which clears bit in leaf rcu_node's qsmask. Propagate up the tree."
+          PROV:
+            - kernel/rcu/tree.c:L2724
+        - step: "Grace period complete"
+          entity: rcu_gp_cleanup
+          action: "When all bits in all rcu_node qsmask are clear (root node qsmask == 0), GP done. Update gp_end. Wake sync_waiters."
+          PROV:
+            - kernel/rcu/tree.c:L2178-L2200
+        - step: "Callback invocation"
+          entity: rcu_data
+          action: "Callback processing (via softirq or RCU_SOFTIRQ): iterate cblist, invoke callbacks whose GP sequence has completed."
+          PROV:
+            - kernel/rcu/tree.c:L3277-L3320
+      effects:
+        - entity: Memory
+          change:
+            from: Old data visible to readers
+            to: New data visible (after call_rcu callback executes)
+          PROV:
+            - include/linux/rcupdate.h:L830-L840
+        - entity: rcu_state.gp_seq
+          change:
+            from: old_gp_seq
+            to: old_gp_seq + (1 << RCU_SEQ_CTR_SHIFT)
+          PROV:
+            - kernel/rcu/tree.c:L1832-L1870
+      constraints:
+        - C2
+        - C3
+        - C4
+      PROV:
+        - kernel/rcu/tree.c:L1832-L1870
+        - kernel/rcu/tree.c:L2178-L2200
+        - kernel/rcu/tree.c:L3277-L3320
+
+    - id: M2
+      name: RCUReadSide
+      description: "rcu_read_lock() → access shared data (rcu_dereference) → rcu_read_unlock(). Readers can proceed concurrently with writers."
+      chain:
+        - step: "Enter RCU read-side CS"
+          entity: rcu_read_lock
+          action: "__rcu_read_lock(): increment rcu_read_lock_nesting (PREEMPT_RCU) or preempt_disable() (non-PREEMPT)."
+          PROV:
+            - include/linux/rcupdate.h:L830-L840
+        - step: "RCU-protected access"
+          entity: rcu_read_lock
+          action: "Use rcu_dereference() to read RCU-protected pointer. No blocking. No sleeping."
+          PROV:
+            - include/linux/rcupdate.h:L830-L840
+        - step: "Exit RCU read-side CS"
+          entity: rcu_read_unlock
+          action: "__rcu_read_unlock(): decrement rcu_read_lock_nesting (PREEMPT_RCU) or preempt_enable() (non-PREEMPT)."
+          PROV:
+            - include/linux/rcupdate.h:L830-L840
+      effects:
+        - entity: GP progress
+          change:
+            from: GP can complete (all CPUs reported QS)
+            to: This CPU cannot report QS (in read-side CS)
+          PROV:
+            - kernel/rcu/tree.h:L41-L100
+      constraints:
+        - C1
+        - C4
+      PROV:
+        - include/linux/rcupdate.h:L830-L840
+
+  Coverage:
+    Included:
+      - target: include/linux/rcupdate.h
+        reason: "rcu_read_lock/unlock API, rcu_preempt_depth"
+      - target: kernel/rcu/tree.h
+        reason: "rcu_state, rcu_node, rcu_data struct definitions"
+      - target: kernel/rcu/tree.c
+        reason: "rcu_gp_init, rcu_gp_cleanup, call_rcu, synchronize_rcu, rcu_sched_clock_irq"
+      - target: kernel/rcu/tree_plugin.h
+        reason: "__rcu_read_lock/__rcu_read_unlock implementation (PREEMPT_RCU)"
+    Excluded:
+      - target: kernel/rcu/rcu_segcblist.c
+        reason: "Callback list management detail — not required for understanding the lifecycle"
+      - target: kernel/rcu/rcu.h
+        reason: "Internal helper macros"
+      - target: include/linux/rcu_segcblist.h
+        reason: "Callback list data structure — internal to RCU implementation"

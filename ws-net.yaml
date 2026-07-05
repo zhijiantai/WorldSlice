@@ -1,0 +1,576 @@
+# Linux TCP/IP Networking World Slice v1.0
+# Expansion from ws-minimal-linux.yaml — covers TCP connection lifecycle and packet flow
+# coding-blueprints v2 — module-scoped, minimal strictness
+# Source: Linux 7.2-rc1 (~/Documents/code/linux/)
+
+WorldSlice:
+
+  Metadata:
+    question: "How does Linux TCP handle connection setup and packet delivery from NIC to socket?"
+    normalized_objective: "Cover the core TCP/IPv4 data path: socket creation → connect/listen → 3-way handshake → data receive (NIC → ip_rcv → tcp_v4_rcv → sock) → data send (tcp_sendmsg → ip_queue_xmit)."
+    scope: module-scoped
+    strictness: minimal
+    source_repo: "Linux 7.2-rc1 — ~/Documents/code/linux/"
+    non_goals:
+      - "Do not cover IPv6"
+      - "Do not cover wireless (mac80211)"
+      - "Do not cover bridge/OVS/switchdev"
+      - "Do not cover netfilter internals (just hook existence)"
+      - "Do not cover TLS/QUIC offload"
+      - "Do not cover specific NIC driver details"
+      - "Do not cover TCP congestion control algorithms in detail"
+
+  ConsumerInstructions:
+    reasoning_boundary:
+      - "Treat this World Slice as complete for basic TCP/IPv4 connection lifecycle and data flow."
+      - "Use only facts supported by provenance."
+      - "Do not invent missing protocol states, socket flags, or timer mechanisms."
+      - "Separate Observation, Assumption, and Conclusion."
+    insufficient_scope_behavior:
+      - "Stop when insufficient. Form expansion query."
+    response_style:
+      name: "Technician Caveman"
+      rules:
+        - "Short sentences."
+        - "A → B → C causal chains."
+        - "State uncertainty explicitly."
+
+  Entities:
+    - id: E1
+      name: struct sock
+      type: struct
+      description: >
+        Network socket descriptor — the fundamental per-connection data
+        structure (include/net/sock.h). Contains: sk_state (TCP state),
+        sk_rcvbuf/sk_sndbuf, sk_receive_queue (sk_buff list),
+        sk_write_queue, sk_prot (protocol operations), sk_ops (proto_ops),
+        sk_route_caps, sk_daddr/sk_rcv_saddr, sk_num (local port),
+        sk_dport. One per open socket.
+      PROV:
+        - include/net/sock.h:L200-L400
+
+    - id: E2
+      name: struct sk_buff
+      type: struct
+      description: >
+        Network packet buffer (include/linux/skbuff.h). Contains:
+        data/head/tail/end pointers (packet data in linear area),
+        sk (owning sock), dev (net_device), cb[] (control block —
+        48 bytes for per-protocol metadata), truesize (memory accounting),
+        protocol, ip_summed, network_header/transport_header offsets.
+        Single allocation per packet received or sent.
+      PROV:
+        - include/linux/skbuff.h:L200-L400
+
+    - id: E3
+      name: struct net_device
+      type: struct
+      description: >
+        Network interface device (include/linux/netdevice.h). Contains:
+        name (e.g. "eth0"), dev_addr (MAC), mtu, flags (IFF_UP, etc.),
+        netdev_ops (ndo_start_xmit, etc.), features (GSO, TSO, GRO),
+        qdisc (traffic control queue), rx_handler if enslaved.
+        One per registered network interface.
+      PROV:
+        - include/linux/netdevice.h:L900-L1200
+
+    - id: E4
+      name: tcp_prot (struct proto)
+      type: struct
+      description: >
+        TCP protocol operations table (net/ipv4/tcp_ipv4.c:3335).
+        Contains: .connect = tcp_v4_connect, .disconnect = tcp_disconnect,
+        .accept = inet_csk_accept, .sendmsg = tcp_sendmsg,
+        .recvmsg = tcp_recvmsg, .backlog_rcv = tcp_v4_do_rcv,
+        .hash = inet_hash, .unhash = inet_unhash.
+        The dispatch table for socket operations on TCP sockets.
+      PROV:
+        - net/ipv4/tcp_ipv4.c:L3335-L3400
+
+    - id: E5
+      name: inet_stream_ops (struct proto_ops)
+      type: struct
+      description: >
+        PF_INET/SOCK_STREAM socket operations (net/ipv4/af_inet.c:1060).
+        Contains: .bind = inet_bind, .connect = inet_stream_connect,
+        .listen = inet_listen, .accept = inet_accept, .sendmsg = inet_sendmsg,
+        .recvmsg = inet_recvmsg. The first dispatch from sys_socket to
+        protocol-specific functions.
+      PROV:
+        - net/ipv4/af_inet.c:L1060-L1100
+
+    - id: E6
+      name: ip_rcv
+      type: function
+      description: >
+        IP layer receive entry point (net/ipv4/ip_input.c:603).
+        Called by netif_receive_skb() for AF_PACKET or registered protocol
+        handler. Performs: packet validation, netfilter (NF_INET_PRE_ROUTING),
+        calls ip_rcv_finish() for routing decision.
+      PROV:
+        - net/ipv4/ip_input.c:L603-L640
+
+    - id: E7
+      name: ip_local_deliver
+      type: function
+      description: >
+        Deliver locally-addressed IP packet (net/ipv4/ip_input.c:250).
+        After routing decides destination is local. Runs netfilter
+        (NF_INET_LOCAL_IN), then calls protocol handler based on
+        ip_hdr->protocol (TCP → tcp_v4_rcv, UDP → udp_rcv).
+      PROV:
+        - net/ipv4/ip_input.c:L250-L280
+
+    - id: E8
+      name: tcp_v4_rcv
+      type: function
+      description: >
+        TCP receive entry point (net/ipv4/tcp_ipv4.c:2067).
+        Called from IP layer for TCP packets. Looks up socket by
+        (source IP, dest IP, source port, dest port) via __inet_lookup_skb.
+        If connection found: handles to established state or listen state.
+        Queues to socket backlog or receive queue.
+      PROV:
+        - net/ipv4/tcp_ipv4.c:L2067-L2150
+
+    - id: E9
+      name: tcp_v4_connect
+      type: function
+      description: >
+        TCP active connection open (net/ipv4/tcp_ipv4.c:221).
+        Called from connect() syscall path: inet_stream_connect →
+        inet_dgram_connect → tcp_v4_connect. Sets up routing via
+        ip_route_connect(), allocates outgoing ISN, sends SYN.
+        Transitions sk_state from CLOSED to SYN_SENT.
+      PROV:
+        - net/ipv4/tcp_ipv4.c:L221-L260
+
+    - id: E10
+      name: tcp_rcv_state_process
+      type: function
+      description: >
+        TCP state machine for non-established connections
+        (net/ipv4/tcp_input.c:7122). Handles SYN, SYN-ACK, ACK, FIN, RST
+        for states: CLOSE, LISTEN, SYN_SENT, SYN_RECV, FIN_WAIT1/2,
+        CLOSE_WAIT, LAST_ACK, CLOSING, TIME_WAIT. State transitions
+        follow RFC 793.
+      PROV:
+        - net/ipv4/tcp_input.c:L7122-L7200
+
+    - id: E11
+      name: tcp_rcv_established
+      type: function
+      description: >
+        Fast path TCP receive (net/ipv4/tcp_input.c:6470).
+        Called when sk_state == TCP_ESTABLISHED. Two sub-paths:
+        fast path (predicted ACK, no out-of-order) processes in
+        few instructions; slow path handles out-of-order, window
+        updates, urgent data, PAWS timestamp checks.
+      PROV:
+        - net/ipv4/tcp_input.c:L6470-L6600
+
+    - id: E12
+      name: tcp_sendmsg
+      type: function
+      description: >
+        TCP data send (net/ipv4/tcp.c). Called from sendmsg() syscall.
+        Takes user data, builds sk_buff(s), copies data, sets TCP
+        headers, queues to sk_write_queue. Calls tcp_push() if enough
+        data or push flag. Eventually calls tcp_transmit_skb().
+      PROV:
+        - net/ipv4/tcp.c:L1200-L1350
+
+    - id: E13
+      name: tcp_transmit_skb
+      type: function
+      description: >
+        Send a single TCP sk_buff (net/ipv4/tcp_output.c).
+        Builds TCP header (seq/ack, window, flags), sets checksum,
+        calls ip_queue_xmit() to pass to IP layer for routing + output.
+      PROV:
+        - net/ipv4/tcp_output.c:L900-L1000
+
+    - id: E14
+      name: ip_queue_xmit
+      type: function
+      description: >
+        IP output for TCP sockets (net/ipv4/ip_output.c:545).
+        Builds IP header from socket route cache (inet_sk(sk)->dst).
+        Runs netfilter (NF_INET_LOCAL_OUT). Calls ip_local_out() which
+        calls dst_output() → dev_queue_xmit() → NIC driver.
+      PROV:
+        - net/ipv4/ip_output.c:L545-L600
+
+    - id: E15
+      name: tcp_v4_syn_recv_sock
+      type: function
+      description: >
+        Create child socket from SYN+ACK handshake
+        (net/ipv4/tcp_ipv4.c:1671). Called when server-side LISTEN
+        socket receives SYN, creates request_sock. When SYN+ACK
+        acknowledged, creates full child socket: allocates sock,
+        copies route info, sets initial congestion window, adds to
+        ehash table (established hash).
+      PROV:
+        - net/ipv4/tcp_ipv4.c:L1671-L1720
+
+    - id: E16
+      name: tcp_conn_request
+      type: function
+      description: >
+        TCP connection request handling (net/ipv4/tcp_input.c:7590).
+        Called from tcp_rcv_state_process when state=LISTEN and SYN
+        received. Checks listen backlog (sk_acceptq). Allocates
+        request_sock, sends SYN+ACK via tcp_send_synack. The half-open
+        connection is tracked in the listen socket's ehash.
+      PROV:
+        - net/ipv4/tcp_input.c:L7590-L7700
+
+    - id: E17
+      name: inet_csk_accept
+      type: function
+      description: >
+        Accept next established connection (net/ipv4/inet_connection_sock.c:649).
+        Called from accept() syscall. Blocks on listen socket's wait
+        queue until a child socket moves to TCP_ESTABLISHED. Dequeues
+        from accept queue.
+      PROV:
+        - net/ipv4/inet_connection_sock.c:L649-L700
+
+    - id: E18
+      name: __inet_lookup_skb / __inet_lookup_established
+      type: function
+      description: >
+        Lookup socket by 4-tuple (net/ipv4/inet_hashtables.c).
+        Uses read_lock on ehash chain. Hash key = (saddr, daddr, sport, dport).
+        Returns established or listen socket. Fast path uses
+        chain walk with prefetch.
+      PROV:
+        - net/ipv4/inet_hashtables.c:L140-L200
+
+  Relationships:
+    - id: R1
+      source: sys_connect
+      target: inet_stream_connect
+      type: dispatches
+      description: "connect(fd, addr) → sock->ops->connect → inet_stream_connect → tcp_v4_connect"
+      PROV:
+        - net/ipv4/af_inet.c:L1060-L1100
+
+    - id: R2
+      source: tcp_v4_connect
+      target: tcp_transmit_skb
+      type: calls
+      description: "tcp_v4_connect() sends SYN via tcp_connect() → tcp_transmit_skb()"
+      PROV:
+        - net/ipv4/tcp_ipv4.c:L221-L260
+
+    - id: R3
+      source: ip_rcv
+      target: ip_local_deliver
+      type: routes
+      description: "After routing decision: if packet is local, ip_rcv_finish() → ip_local_deliver()"
+      PROV:
+        - net/ipv4/ip_input.c:L603-L640
+        - net/ipv4/ip_input.c:L250-L280
+
+    - id: R4
+      source: ip_local_deliver
+      target: tcp_v4_rcv
+      type: dispatches
+      description: "ip_local_deliver() → ip_local_deliver_finish() → protocol handler based on ip_protocol → tcp_v4_rcv for TCP packets"
+      PROV:
+        - net/ipv4/ip_input.c:L250-L280
+
+    - id: R5
+      source: tcp_v4_rcv
+      target: __inet_lookup_skb
+      type: calls
+      description: "tcp_v4_rcv() calls __inet_lookup_skb() to find the socket by 4-tuple"
+      PROV:
+        - net/ipv4/tcp_ipv4.c:L2067-L2150
+
+    - id: R6
+      source: tcp_v4_rcv
+      target: tcp_rcv_state_process
+      type: calls
+      description: "If socket is not ESTABLISHED (e.g. SYN_SENT, LISTEN, TIME_WAIT), tcp_v4_rcv calls tcp_rcv_state_process"
+      PROV:
+        - net/ipv4/tcp_input.c:L7122-L7200
+
+    - id: R7
+      source: tcp_v4_rcv
+      target: tcp_rcv_established
+      type: calls
+      description: "If socket is TCP_ESTABLISHED, tcp_v4_rcv calls tcp_v4_do_rcv → tcp_rcv_established"
+      PROV:
+        - net/ipv4/tcp_input.c:L6470-L6600
+
+    - id: R8
+      source: tcp_conn_request
+      target: tcp_v4_syn_recv_sock
+      type: triggers
+      description: "tcp_conn_request() sends SYN+ACK. When ACK comes back, tcp_v4_syn_recv_sock() creates the full child socket."
+      PROV:
+        - net/ipv4/tcp_input.c:L7590-L7700
+        - net/ipv4/tcp_ipv4.c:L1671-L1720
+
+    - id: R9
+      source: inet_csk_accept
+      target: struct sock (child)
+      type: dequeues
+      description: "inet_csk_accept() waits for and dequeues a TCP_ESTABLISHED child socket from the listen socket's accept queue."
+      PROV:
+        - net/ipv4/inet_connection_sock.c:L649-L700
+
+    - id: R10
+      source: tcp_sendmsg
+      target: tcp_transmit_skb
+      type: builds
+      description: "tcp_sendmsg builds sk_buff with user data, then calls tcp_push() → __tcp_push_pending_frames() → tcp_transmit_skb()"
+      PROV:
+        - net/ipv4/tcp.c:L1200-L1350
+
+    - id: R11
+      source: tcp_transmit_skb
+      target: ip_queue_xmit
+      type: calls
+      description: "tcp_transmit_skb() builds TCP header then calls ip_queue_xmit() to deliver to IP layer"
+      PROV:
+        - net/ipv4/tcp_output.c:L900-L1000
+        - net/ipv4/ip_output.c:L545-L600
+
+    - id: R12
+      source: ip_queue_xmit
+      target: struct net_device
+      type: outputs_via
+      description: "ip_queue_xmit → ip_local_out → dst_output → neigh_output → dev_queue_xmit → net_device->netdev_ops->ndo_start_xmit"
+      PROV:
+        - net/ipv4/ip_output.c:L545-L600
+
+    - id: R13
+      source: struct sock
+      target: struct sk_buff
+      type: owns
+      description: "sock->sk_receive_queue holds inbound sk_buffs. sock->sk_write_queue holds outbound pending sk_buffs."
+      PROV:
+        - include/net/sock.h:L200-L400
+
+  Constraints:
+    - id: C1
+      applies_to: tcp_v4_connect
+      description: "connect() can only be called on a CLOSED TCP socket. sk_state transitions CLOSED → SYN_SENT. Only one connect at a time."
+      PROV:
+        - net/ipv4/tcp_ipv4.c:L221-L260
+
+    - id: C2
+      applies_to: tcp_rcv_state_process
+      description: "tcp_rcv_state_process handles all state transitions per RFC 793. SYN in LISTEN → SYN_RECV. SYN-ACK in SYN_SENT → ESTABLISHED. FIN/ACK transitions to CLOSE_WAIT, FIN_WAIT, etc."
+      PROV:
+        - net/ipv4/tcp_input.c:L7122-L7200
+
+    - id: C3
+      applies_to: tcp_conn_request
+      description: "If listen socket accept queue is full (sk_acceptq > sk_max_ack_backlog), SYN is dropped (or cookie sent if SYN cookies enabled)."
+      PROV:
+        - net/ipv4/tcp_input.c:L7590-L7700
+
+    - id: C4
+      applies_to: ip_rcv
+      description: "ip_rcv expects complete L2 frame with valid IP header. Calls netfilter NF_INET_PRE_ROUTING. Runs before any routing decision."
+      PROV:
+        - net/ipv4/ip_input.c:L603-L640
+
+  Mechanisms:
+    - id: M1
+      name: TCPConnectActive
+      description: "connect() → tcp_v4_connect → route lookup → SYN sent → SYN-ACK received → ACK sent → ESTABLISHED. The client-side 3-way handshake."
+      chain:
+        - step: "socket() + connect()"
+          entity: inet_stream_connect
+          action: "Create TCP socket with SOCK_STREAM. inet_stream_connect → tcp_v4_connect."
+          PROV:
+            - net/ipv4/af_inet.c:L1060-L1100
+        - step: "Route + SYN"
+          entity: tcp_v4_connect
+          action: "ip_route_connect. Set ISN (initial sequence number). Set sk_state = TCP_SYN_SENT. tcp_connect sends SYN via tcp_transmit_skb."
+          PROV:
+            - net/ipv4/tcp_ipv4.c:L221-L260
+        - step: "SYN-ACK received"
+          entity: tcp_v4_rcv
+          action: "Server's SYN-ACK arrives. __inet_lookup_skb finds socket in SYN_SENT. tcp_rcv_state_process: validates ACK, transitions to TCP_ESTABLISHED."
+          PROV:
+            - net/ipv4/tcp_input.c:L7122-L7150
+        - step: "ACK sent"
+          entity: tcp_rcv_state_process
+          action: "Send ACK (piggyback or standalone). Connection ESTABLISHED. Socket ready for recv/send."
+          PROV:
+            - net/ipv4/tcp_input.c:L7122-L7200
+      effects:
+        - entity: struct sock (client)
+          change:
+            from: TCP_CLOSED
+            to: TCP_SYN_SENT → TCP_ESTABLISHED
+          PROV:
+            - net/ipv4/tcp_ipv4.c:L221-L260
+      constraints:
+        - C1
+        - C2
+      PROV:
+        - net/ipv4/tcp_ipv4.c:L221-L260
+        - net/ipv4/tcp_input.c:L7122-L7200
+
+    - id: M2
+      name: TCPAcceptPassive
+      description: "listen() → SYN from client → tcp_conn_request → SYN-ACK → ACK from client → tcp_v4_syn_recv_sock → child socket. The server-side 3-way handshake."
+      chain:
+        - step: "listen()"
+          entity: inet_listen
+          action: "Set sk_state = TCP_LISTEN. Allocate accept queue (sk_acceptq)."
+          PROV:
+            - net/ipv4/af_inet.c:L1060-L1100
+        - step: "SYN arrives"
+          entity: tcp_conn_request
+          action: "tcp_rcv_state_process (state=LISTEN, SYN=1). tcp_conn_request: check backlog, alloc request_sock (req), send SYN-ACK via tcp_send_synack."
+          PROV:
+            - net/ipv4/tcp_input.c:L7590-L7700
+        - step: "ACK arrives → child socket"
+          entity: tcp_v4_syn_recv_sock
+          action: "Client ACK received. tcp_check_req → tcp_v4_syn_recv_sock. Alloc full child sock, copy route, add to established hash. Wake accept() wait queue."
+          PROV:
+            - net/ipv4/tcp_ipv4.c:L1671-L1720
+        - step: "accept() returns"
+          entity: inet_csk_accept
+          action: "Dequeue child from accept queue. Return fd to user. sk_state=TCP_ESTABLISHED."
+          PROV:
+            - net/ipv4/inet_connection_sock.c:L649-L700
+      effects:
+        - entity: struct sock (child)
+          change:
+            from: NonExistent
+            to: TCP_ESTABLISHED (new fd)
+          PROV:
+            - net/ipv4/tcp_ipv4.c:L1671-L1720
+      constraints:
+        - C3
+      PROV:
+        - net/ipv4/tcp_input.c:L7590-L7700
+        - net/ipv4/tcp_ipv4.c:L1671-L1720
+
+    - id: M3
+      name: TCPDataReceive
+      description: "NIC IRQ → netif_receive_skb → ip_rcv → ip_local_deliver → tcp_v4_rcv → socket lookup → tcp_rcv_established → sk_receive_queue → recvmsg(). The inbound data path."
+      chain:
+        - step: "NIC receives packet"
+          entity: struct sk_buff
+          action: "NIC driver DMA's packet into sk_buff. Calls napi_gro_receive → netif_receive_skb."
+          PROV:
+            - include/linux/skbuff.h:L200-L400
+        - step: "IP layer"
+          entity: ip_rcv
+          action: "Validate IP header. Netfilter PRE_ROUTING. Route lookup. Local delivery → ip_local_deliver."
+          PROV:
+            - net/ipv4/ip_input.c:L603-L640
+        - step: "TCP receive"
+          entity: tcp_v4_rcv
+          action: "Find socket by 4-tuple. If ESTABLISHED → tcp_rcv_established. Validate seq/ack, check window, queue data."
+          PROV:
+            - net/ipv4/tcp_ipv4.c:L2067-L2150
+        - step: "Socket queue"
+          entity: tcp_rcv_established
+          action: "Fast path: copy data directly to user memory (if recvmsg already waiting). Slow path: queue to sk_receive_queue, wake up waiters."
+          PROV:
+            - net/ipv4/tcp_input.c:L6470-L6600
+        - step: "recvmsg returns data"
+          entity: tcp_recvmsg
+          action: "tcp_recvmsg() locks socket, copies from sk_receive_queue to user buffer. After copy: update window, send ACK if needed."
+          PROV:
+            - net/ipv4/tcp.c:L2000-L2150
+      effects:
+        - entity: sk_buff
+          change:
+            from: In NIC driver
+            to: On sk_receive_queue → consumed by user
+          PROV:
+            - net/ipv4/tcp_input.c:L6470-L6600
+      constraints:
+        - C4
+      PROV:
+        - net/ipv4/ip_input.c:L603-L640
+        - net/ipv4/tcp_ipv4.c:L2067-L2150
+        - net/ipv4/tcp_input.c:L6470-L6600
+
+  MissingScope:
+    - topic: "UDP receive path (udp_rcv, udp_queue_rcv_skb)"
+      reason: "UDP is stateless and much simpler than TCP. Different receive and send paths."
+      required_for: "Complete layer 4 coverage"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does Linux UDP receive work?"
+          scope: module-scoped
+          strictness: minimal
+          target:
+            - "net/ipv4/udp.c"
+        Missing because:
+          - "Current slice covers TCP only"
+
+    - topic: "TCP congestion control (reno, cubic, bbr)"
+      reason: "Congestion control affects window management, slow start, and ACK processing."
+      required_for: "Complete understanding of TCP throughput dynamics"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does TCP CUBIC congestion control work in Linux?"
+          scope: module-scoped
+          strictness: minimal
+          target:
+            - "net/ipv4/tcp_cubic.c"
+        Missing because:
+          - "Current slice does not cover CC algorithm internals"
+
+    - topic: "NAPI and GRO (Generic Receive Offload)"
+      reason: "GRO coalesces multiple TCP ACKs into one sk_buff. NAPI is the modern polling-based receive path."
+      required_for: "Understanding NIC-to-IP-layer performance path"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does NAPI/GRO work in Linux networking?"
+          scope: module-scoped
+          strictness: minimal
+          target:
+            - "net/core/dev.c"
+            - "include/linux/netdevice.h"
+        Missing because:
+          - "Current slice starts from ip_rcv; NIC receive and GRO are below this"
+
+  Coverage:
+    Included:
+      - target: include/net/sock.h
+        reason: "struct sock definition"
+      - target: include/linux/skbuff.h
+        reason: "struct sk_buff definition"
+      - target: include/linux/netdevice.h
+        reason: "struct net_device definition"
+      - target: net/ipv4/af_inet.c
+        reason: "inet_stream_ops, socket create"
+      - target: net/ipv4/tcp_ipv4.c
+        reason: "tcp_v4_connect, tcp_v4_rcv, tcp_v4_syn_recv_sock, tcp_prot"
+      - target: net/ipv4/tcp_input.c
+        reason: "tcp_rcv_state_process, tcp_rcv_established, tcp_conn_request"
+      - target: net/ipv4/tcp_output.c
+        reason: "tcp_transmit_skb"
+      - target: net/ipv4/ip_input.c
+        reason: "ip_rcv, ip_local_deliver"
+      - target: net/ipv4/ip_output.c
+        reason: "ip_queue_xmit"
+      - target: net/ipv4/inet_connection_sock.c
+        reason: "inet_csk_accept"
+      - target: net/ipv4/inet_hashtables.c
+        reason: "__inet_lookup_established"
+    Excluded:
+      - target: net/ipv4/tcp_cong.c
+        reason: "Congestion control — separate scope"
+      - target: net/ipv4/arp.c
+        reason: "ARP resolution — L2 detail"
+      - target: net/ipv4/netfilter/
+        reason: "Netfilter hooks referenced as control points, not detailed"
+      - target: drivers/net/
+        reason: "NIC drivers — excluded by non_goals"

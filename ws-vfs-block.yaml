@@ -1,0 +1,502 @@
+# Linux VFS → Block I/O World Slice v1.0
+# Expansion from ws-minimal-linux.yaml — covers user-space read/write to block device I/O
+
+WorldSlice:
+
+  Metadata:
+    question: "Linux VFS层如何将用户空间read/write连接到块设备I/O"
+    normalized_objective: "Trace the read path from ksys_read → vfs_read → file_operations.read_iter → ext4 → address_space_operations → page cache → bio → block layer → device"
+    scope: module-scoped
+    strictness: minimal
+    source_repo: "Linux 7.2-rc1 — ~/Documents/code/linux/"
+    non_goals:
+      - "Do not cover write path in detail (mirror of read with different constraints)"
+      - "Do not cover directory operations (mkdir, rmdir, link, unlink)"
+      - "Do not cover inode allocation or filesystem creation"
+      - "Do not cover file locking or lease mechanisms"
+      - "Do not cover io_uring (async I/O bypass path)"
+      - "Do not cover device mapper, MD RAID, or dm-crypt stacking"
+
+  ConsumerInstructions:
+    reasoning_boundary:
+      - "Treat this World Slice as complete for tracing syscall → block device I/O."
+      - "Use only facts supported by provenance."
+      - "Do not invent missing VFS operations, page cache states, or bio completion paths."
+      - "Separate Observation, Assumption, and Conclusion."
+    insufficient_scope_behavior:
+      - "Stop when insufficient."
+      - "Identify exact missing information."
+      - "Form copy-ready Scope Expansion Query."
+    response_style:
+      name: "Technician Caveman"
+      rules:
+        - "Short sentences."
+        - "Preserve technical terms."
+        - "Prefer A → B → C causal chains."
+        - "State uncertainty explicitly."
+
+  Entities:
+    - id: E1
+      name: file (struct file)
+      type: struct
+      description: >
+        Open file descriptor representation. Contains f_op (file_operations),
+        f_mapping (address_space), f_inode pointer, f_pos (current position),
+        f_flags (O_RDONLY/O_WRONLY/O_DIRECT). One per open() call.
+      PROV:
+        - include/linux/fs.h:L1255-L1290
+
+    - id: E2
+      name: file_operations
+      type: struct
+      description: >
+        Dispatch table for file operations. VFS calls file->f_op->read_iter
+        or file->f_op->write_iter. Each filesystem (ext4, btrfs, xfs)
+        provides its own instance. ext4_file_operations is the ext4 instance.
+      PROV:
+        - include/linux/fs.h:L1255-L1290 (f_op field on file)
+        - fs/ext4/file.c:L974-L995
+
+    - id: E3
+      name: dentry (struct dentry)
+      type: struct
+      description: >
+        Directory entry: maps path component to inode. Contains d_name (filename),
+        d_parent, d_inode, d_sb (super_block), d_lockref (refcount+lock).
+        RCU-protected lookup via d_seq. Negative dentry when d_inode=NULL.
+      PROV:
+        - include/linux/dcache.h:L93-L140
+
+    - id: E4
+      name: inode (struct inode)
+      type: struct
+      description: >
+        On-disk inode representation in memory. Contains i_op (inode_operations),
+        i_mapping (address_space), i_sb (super_block), i_size (file size),
+        i_ino (inode number), i_nlink, i_uid/i_gid, i_mode. One per unique file.
+      PROV:
+        - include/linux/fs.h:L762-L810
+
+    - id: E5
+      name: super_block (struct super_block)
+      type: struct
+      description: >
+        Mounted filesystem descriptor. Contains s_type (filesystem type),
+        s_op (super_operations), s_root (root dentry), s_bdev (block device),
+        s_bdi (backing_dev_info), s_fs_info (fs private data), s_blocksize.
+        One per mounted filesystem.
+      PROV:
+        - include/linux/fs/super_types.h:L132-L200
+
+    - id: E6
+      name: address_space (struct address_space)
+      type: struct
+      description: >
+        Page cache mapping between inode and pages. Contains host (inode),
+        a_ops (address_space_operations: read_folio, writepages, etc.),
+        i_pages (xarray of cached folios), nrpages count.
+        The central data structure connecting VFS page cache to filesystem.
+      PROV:
+        - include/linux/fs.h:L762-L810 (i_mapping field on inode)
+
+    - id: E7
+      name: address_space_operations (ext4_aops)
+      type: struct
+      description: >
+        Per-filesystem page cache operations. ext4_aops provides:
+        .read_folio = ext4_read_folio, .readahead = ext4_readahead,
+        .writepages = ext4_writepages, .write_begin = ext4_write_begin.
+        Called by page cache when faulting pages from disk.
+      PROV:
+        - fs/ext4/inode.c:L3950-L3964
+
+    - id: E8
+      name: filemap_read / generic_file_read_iter
+      type: function
+      description: >
+        Generic page-cache-based read. filemap_read() iterates over folios,
+        calls filemap_get_pages() to populate page cache (synchronously or via
+        readahead), copies data to user buffer. Used when no direct I/O.
+      PROV:
+        - mm/filemap.c:L2777-L2820
+
+    - id: E9
+      name: bio (struct bio)
+      type: struct
+      description: >
+        Block I/O request descriptor. Contains bi_bdev (target block device),
+        bi_opf (operation + flags: REQ_OP_READ/WRITE), bi_io_vec (data vectors),
+        bi_iter (current position in vec list), bi_end_io (completion callback),
+        bi_status (error status). The fundamental I/O unit in the block layer.
+      PROV:
+        - include/linux/blk_types.h:L210-L250
+
+    - id: E10
+      name: submit_bio_noacct / __submit_bio
+      type: function
+      description: >
+        Entry point from filesystem block device I/O to the block layer.
+        submit_bio_noacct_nochk() calls __submit_bio_noacct_mq() which loops
+        calling __submit_bio(). __submit_bio() dispatches to blk_mq_submit_bio()
+        for modern multi-queue devices, or disk->fops->submit_bio() for legacy.
+      PROV:
+        - block/blk-core.c:L670-L700
+        - block/blk-core.c:L749-L760
+
+    - id: E11
+      name: vfs_read / ksys_read
+      type: function
+      description: >
+        VFS read entry from syscall. ksys_read(fd, buf, count) → fdget →
+        vfs_read(file, buf, count, pos). vfs_read() checks permissions,
+        calls file->f_op->read() or file->f_op->read_iter via new_sync_read().
+      PROV:
+        - fs/read_write.c:L554-L620
+        - fs/read_write.c:L705
+
+    - id: E12
+      name: ext4_file_read_iter
+      type: function
+      description: >
+        ext4-specific read dispatch. File offset → if DAX use ext4_dax_read_iter,
+        if O_DIRECT use ext4_dio_read_iter, otherwise fall back to
+        generic_file_read_iter (buffered read via page cache).
+      PROV:
+        - fs/ext4/file.c:L130-L150
+
+    - id: E13
+      name: ext4_read_folio / ext4_readahead
+      type: function
+      description: >
+        Ext4 page cache I/O. ext4_read_folio() submits a single folio read;
+        ext4_readahead() submits multiple folios. Both build bios via
+        mpage_readahead() / mpage_read_folio() which construct bio and
+        call submit_bio_noacct().
+      PROV:
+        - fs/ext4/inode.c:L3950-L3964 (aops registration)
+
+    - id: E14
+      name: mpage_read_folio / mpage_readahead
+      type: function
+      description: >
+        mpage (multi-page) I/O submission. Builds struct bio with map_blocks()
+        to translate file blocks to disk blocks. Calls submit_bio_noacct()
+        on the completed bio. Handles block mapping, allocation, and bio
+        splitting for ext4.
+      PROV:
+        - fs/ext4/inode.c:L3950-L3964 (ext4_aops references these)
+
+    - id: E15
+      name: path_openat / do_filp_open
+      type: function
+      description: >
+        Path walking for open(). Walks each path component via RCU lookup
+        (or ref-walk), resolves dentry → inode, checks permissions,
+        creates file struct. do_filp_open() wraps path_openat() with
+        retry on LOOKUP_RCU failure.
+      PROV:
+        - fs/namei.c:L4843-L4920
+
+  Relationships:
+    - id: R1
+      source: ksys_read
+      target: vfs_read
+      type: calls
+      description: "syscall dispatch: ksys_read() fd → file, calls vfs_read(file, buf, count, pos)"
+      PROV:
+        - fs/read_write.c:L705-L720
+
+    - id: R2
+      source: vfs_read
+      target: file_operations
+      type: dispatches
+      description: "vfs_read() calls file->f_op->read_iter via new_sync_read() for modern filesystems"
+      PROV:
+        - fs/read_write.c:L554-L620
+
+    - id: R3
+      source: file
+      target: dentry
+      type: contains
+      description: "file->f_path.dentry → dentry for this file (path resolution result)"
+      PROV:
+        - include/linux/fs.h:L1255-L1290
+
+    - id: R4
+      source: dentry
+      target: inode
+      type: points_to
+      description: "dentry->d_inode → the file's inode. NULL means negative dentry (file not found)."
+      PROV:
+        - include/linux/dcache.h:L93-L140
+
+    - id: R5
+      source: dentry
+      target: super_block
+      type: belongs_to
+      description: "dentry->d_sb → the super_block of the mounted filesystem"
+      PROV:
+        - include/linux/dcache.h:L93-L140
+
+    - id: R6
+      source: file
+      target: address_space
+      type: maps_via
+      description: "file->f_mapping → inode->i_mapping → address_space for page cache"
+      PROV:
+        - include/linux/fs.h:L1255-L1290
+
+    - id: R7
+      source: generic_file_read_iter
+      target: filemap_read
+      type: calls
+      description: "generic_file_read_iter() calls filemap_read() to do buffered read from page cache"
+      PROV:
+        - mm/filemap.c:L2965-L3010
+
+    - id: R8
+      source: filemap_read
+      target: address_space_operations
+      type: calls
+      description: "filemap_read() → filemap_get_pages() calls a_ops->read_folio() or ->readahead() when page cache misses"
+      PROV:
+        - mm/filemap.c:L2777-L2820
+
+    - id: R9
+      source: ext4_file_read_iter
+      target: generic_file_read_iter
+      type: delegates
+      description: "ext4_file_read_iter() calls generic_file_read_iter() for buffered reads (non-DAX, non-DIO)"
+      PROV:
+        - fs/ext4/file.c:L130-L150
+
+    - id: R10
+      source: ext4_readahead
+      target: mpage_readahead
+      type: delegates
+      description: "ext4_readahead builds readahead bios via mpage_readahead() which calls submit_bio_noacct()"
+      PROV:
+        - fs/ext4/inode.c:L3950-L3964
+
+    - id: R11
+      source: mpage_readahead
+      target: submit_bio_noacct
+      type: calls
+      description: "mpage_readahead() constructs bio and calls submit_bio_noacct() to dispatch to block layer"
+      PROV:
+        - fs/ext4/inode.c:L3950-L3964
+
+    - id: R12
+      source: submit_bio_noacct
+      target: bio
+      type: dispatches
+      description: "submit_bio_noacct() → __submit_bio() → blk_mq_submit_bio() which places bio on hardware dispatch queue"
+      PROV:
+        - block/blk-core.c:L670-L700
+        - block/blk-core.c:L749-L760
+
+    - id: R13
+      source: bio
+      target: block_device
+      type: targets
+      description: "bio->bi_bdev → the target block device. bio->bi_opf specifies READ/WRITE."
+      PROV:
+        - include/linux/blk_types.h:L210-L250
+
+    - id: R14
+      source: super_block
+      target: block_device
+      type: owns
+      description: "super_block->s_bdev → the underlying block device for the mounted filesystem"
+      PROV:
+        - include/linux/fs/super_types.h:L132-L200
+
+  Constraints:
+    - id: C1
+      applies_to: vfs_read
+      description: "vfs_read() must verify file->f_mode & FMODE_READ before proceeding. Returns -EBADF if no read permission."
+      PROV:
+        - fs/read_write.c:L554-L620
+
+    - id: C2
+      applies_to: filemap_read
+      description: "filemap_read() must check i_size before reading beyond end-of-file. Short read at EOF is valid."
+      PROV:
+        - mm/filemap.c:L2777-L2820
+
+    - id: C3
+      applies_to: submit_bio
+      description: "submit_bio_noacct() must not be called from IRQ context. Bio must have valid bi_bdev and bi_opf."
+      PROV:
+        - block/blk-core.c:L670-L700
+
+    - id: C4
+      applies_to: path_openat
+      description: "Path walk retries from LOOKUP_RCU → ref-walk → LOOKUP_REVAL if dentry validation fails at any step."
+      PROV:
+        - fs/namei.c:L4843-L4920
+
+  Mechanisms:
+    - id: M1
+      name: BufferedReadPath
+      description: "ksys_read() → vfs_read() → ext4_file_read_iter() → generic_file_read_iter() → filemap_read() → ext4_readahead/read_folio → mpage → submit_bio_noacct → block layer"
+      chain:
+        - step: "Syscall enters kernel"
+          entity: ksys_read
+          action: "fd → file struct via fdget. Validate fd, call vfs_read(file, buf, count, &pos)."
+          PROV:
+            - fs/read_write.c:L705-L720
+        - step: "VFS dispatch to filesystem"
+          entity: vfs_read
+          action: "Check FMODE_READ, verify_access. Call file->f_op->read_iter via new_sync_read(). For ext4: ext4_file_read_iter."
+          PROV:
+            - fs/read_write.c:L554-L620
+        - step: "ext4 dispatch"
+          entity: ext4_file_read_iter
+          action: "Check shutdown. If DAX → dax path. If O_DIRECT → dio path. Default: generic_file_read_iter (buffered)."
+          PROV:
+            - fs/ext4/file.c:L130-L150
+        - step: "Page cache read"
+          entity: filemap_read
+          action: "Iterate over file offset. Call filemap_get_pages() to lock/grab folios. If cache hit → copy to user. If cache miss → a_ops->readahead/read_folio."
+          PROV:
+            - mm/filemap.c:L2777-L2820
+        - step: "Block I/O submission"
+          entity: ext4_readahead
+          action: "ext4_readahead() → mpage_readahead() builds struct bio with ext4_map_blocks() for block mapping. Calls submit_bio_noacct()."
+          PROV:
+            - fs/ext4/inode.c:L3950-L3964
+        - step: "Block layer dispatch"
+          entity: submit_bio_noacct
+          action: "__submit_bio_noacct_mq() → __submit_bio() → blk_mq_submit_bio() → hardware dispatch queue. Bio reaches device driver."
+          PROV:
+            - block/blk-core.c:L670-L700
+      effects:
+        - entity: User buffer
+          change:
+            from: Uninitialized
+            to: Contains file data (or partial read)
+          PROV:
+            - fs/read_write.c:L554-L620
+        - entity: Page cache
+          change:
+            from: Cold (no folio for offset)
+            to: Populated (folio uptodate, mapped in i_pages xarray)
+          PROV:
+            - mm/filemap.c:L2777-L2820
+      constraints:
+        - C1
+        - C2
+        - C3
+      PROV:
+        - fs/read_write.c:L554-L620
+        - mm/filemap.c:L2777-L2820
+        - block/blk-core.c:L670-L700
+
+    - id: M2
+      name: PathResolution
+      description: "Path string → dentry walk → inode → file struct. Performed by open(), stat(), etc."
+      chain:
+        - step: "Path walk start"
+          entity: path_openat
+          action: "Starting from root or cwd dentry. Walk each '/' separated component via RCU-walk."
+          PROV:
+            - fs/namei.c:L4843-L4920
+        - step: "Component lookup"
+          entity: path_openat
+          action: "For each component: dentry lookup via parent inode's i_op->lookup(). If not in dcache, trigger filesystem lookup to load from disk."
+          PROV:
+            - fs/namei.c:L4843-L4920
+        - step: "Open file creation"
+          entity: path_openat
+          action: "Last component: dentry + inode. Allocate file struct. Call get_task_cred. Return file."
+          PROV:
+            - fs/namei.c:L4843-L4920
+      effects:
+        - entity: file struct
+          change:
+            from: NonExistent
+            to: Allocated, f_op from inode, f_pos=0
+          PROV:
+            - fs/namei.c:L4843-L4920
+      constraints:
+        - C4
+      PROV:
+        - fs/namei.c:L4843-L4920
+
+  MissingScope:
+    - topic: "Write path (buffered write + journaling)"
+      reason: "Write path adds dirty page tracking, journal commit, and ordered mode constraints"
+      required_for: "Complete read/write lifecycle"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does ext4 buffered write go from write() to journal commit to block I/O?"
+          scope: module-scoped
+          strictness: minimal
+          target:
+            - "fs/ext4/inode.c"
+            - "fs/ext4/ext4_journal.c"
+            - "fs/buffer.c"
+            - "mm/page-writeback.c"
+        Missing because:
+          - "Current slice covers only the read path"
+          - "Write path involves journal, ordered mode, writepages callback"
+
+    - topic: "blk-mq multi-queue dispatch (hardware queues, tags, completions)"
+      reason: "Bio dispatch to actual device driver is a separate complex subsystem"
+      required_for: "Complete block layer I/O lifecycle"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does blk_mq_submit_bio() dispatch a bio through hardware queues to a NVMe/SCSI driver?"
+          scope: module-scoped
+          strictness: minimal
+          target:
+            - "block/blk-mq.c"
+            - "drivers/nvme/host/"
+        Missing because:
+          - "Current slice covers submit_bio_noacct() → __submit_bio() but not mq dispatch"
+
+    - topic: "Direct I/O path (O_DIRECT)"
+      reason: "Direct I/O bypasses page cache, goes straight to bio"
+      required_for: "Full read/write path coverage"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does ext4 direct I/O (O_DIRECT) build and submit bio without page cache?"
+          scope: module-scoped
+          strictness: minimal
+          target:
+            - "fs/ext4/file.c"
+            - "fs/ext4/inode.c"
+            - "fs/direct-io.c"
+        Missing because:
+          - "Current slice covers only buffered I/O path"
+
+  Coverage:
+    Included:
+      - target: fs/read_write.c
+        reason: "VFS read/write dispatch (ksys_read, vfs_read)"
+      - target: mm/filemap.c
+        reason: "Page cache read (filemap_read, generic_file_read_iter)"
+      - target: fs/ext4/file.c
+        reason: "ext4 read dispatch (ext4_file_read_iter, file_operations)"
+      - target: fs/ext4/inode.c
+        reason: "ext4 address_space_operations (read_folio, readahead)"
+      - target: fs/namei.c
+        reason: "Path resolution (path_openat)"
+      - target: include/linux/fs.h
+        reason: "file, inode struct definitions"
+      - target: include/linux/dcache.h
+        reason: "dentry struct definition"
+      - target: include/linux/fs/super_types.h
+        reason: "super_block struct definition"
+      - target: include/linux/blk_types.h
+        reason: "bio struct definition"
+      - target: block/blk-core.c
+        reason: "submit_bio_noacct, __submit_bio"
+    Excluded:
+      - target: fs/ext4/super.c
+        reason: "Filesystem mount/umount — not needed for read path"
+      - target: fs/ext4/extents.c
+        reason: "Extent tree manipulation — mpage handles this internally"
+      - target: block/blk-mq.c
+        reason: "Multi-queue dispatch detail — listed as MissingScope"
