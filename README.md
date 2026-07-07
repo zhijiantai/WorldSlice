@@ -19,6 +19,18 @@ Traditional approach: load the entire kernel source → grep every line → answ
 
 Copy a WS file into any LLM (ChatGPT, Claude, DeepSeek...), then ask your question.
 
+### Annotation tag reference
+
+Every claim in the AI's answer must be tagged with one of:
+
+| Tag | Meaning |
+|:----|:--------|
+| `[WS(file:L100-L200)]` | Directly stated in the World Slice, with provenance |
+| `[WS→INFER]` | Deduced from WS facts by causal chaining |
+| `[KNOWLEDGE]` | From the AI's training data, NOT in any WS |
+
+If the AI relies heavily on `[KNOWLEDGE]`, the WS is **too thin** and should be expanded.
+
 ### Example: Single subsystem
 
 ```
@@ -29,6 +41,24 @@ I have the following Linux kernel world model.
 Question: What is the execution order of mm_core_init()
 and sched_init() inside start_kernel?
 Why is this order necessary?
+
+For each claim in your answer, tag it with:
+  [WS(file:L100-L200)] — stated in the WS with provenance
+  [WS→INFER] — deduced from WS facts by causal chaining
+  [KNOWLEDGE] — from training data, NOT in any WS
+```
+
+Expected answer shape (not exact):
+
+```
+[WS(ws-init.yaml:L20-L30)]  start_kernel order: mm_core_init() → sched_init()
+[WS(ws-init.yaml:L40-L50)]  mm_core_init() builds the page allocator
+[WS→INFER]  The scheduler needs struct page to allocate task_struct.
+  If sched_init ran first, kmem_cache_alloc would dereference
+  uninitialised memory — instant triple fault.
+[KNOWLEDGE] The boot CPU stack is hand-wired in arch/x86 before
+  C code runs. The WS doesn't cover arch/, but that's outside scope
+  because Linux 7.2 boot convention is canonical.
 ```
 
 ### Example: Cross-subsystem
@@ -42,39 +72,28 @@ I have three World Slices:
 
 Question: From write() to data landing on SSD,
 which kernel subsystems does it pass through?
-```
 
-### Example: Traceability — Which parts come from the World Slice?
-
-Good AI reasoning requires distinguishing **WS-grounded facts** from **model-internal knowledge**. Ask for this explicitly:
-
-```
-I have the following World Slice:
-
-<paste ws-init.yaml>
-
-Question: Why does start_kernel call mm_core_init() BEFORE sched_init()?
-
-For each claim in your answer, mark:
-  [WS] = Directly stated in the World Slice
-  [WS→INFER] = Deduced from WS facts by causal chaining
-  [KNOWLEDGE] = From your training data, NOT in the WS
+For each claim in your answer, tag it with:
+  [WS(file:L100-L200)] — stated in the WS with provenance
+  [WS→INFER] — deduced from WS facts by causal chaining
+  [KNOWLEDGE] — from training data, NOT in any WS
 ```
 
 Expected answer shape (not exact):
 
 ```
-[WS] start_kernel order: mm_core_init() → sched_init()
-[WS] mm_core_init() builds the page allocator (struct page, buddy)
-[WS→INFER] The scheduler needs struct page to allocate task_struct.
-  If sched_init ran first, kmem_cache_alloc would dereference
-  uninitialised memory — instant triple fault.
-[KNOWLEDGE] The boot CPU stack is hand-wired in arch/x86 before
-  C code runs. The WS doesn't cover arch/, but that's outside scope
-  because Linux 7.2 boot convention is canonical.
+[WS(ws-vfs-block.yaml:L30-L40)]  write() → sys_write → vfs_write →
+  file->f_op->write_iter → ext4_write_iter
+[WS(ws-fs.yaml:L50-L60)]  ext4_write_iter → ext4_buffered_write →
+  generic_perform_write → block_write_begin → grab_cache_page_write_begin
+[WS(ws-vfs-block.yaml:L80-L90)]  __block_write_begin → submit_bh →
+  submit_bio → blk_mq_submit_bio → NVMe driver
+[WS→INFER]  The page cache (address_space) sits between VFS and block
+  layer. Dirty pages are written back later by flusher threads, not
+  during write() syscall.
+[KNOWLEDGE]  NVMe driver interrupt path uses MSI-X per-IO-queue.
+  Implementation detail not captured in any WS.
 ```
-
-This forces the AI to admit **what it knows from the WS** vs **what it fills in from general kernel knowledge**.
 
 ### Example: When WS is insufficient
 
@@ -85,17 +104,16 @@ I have ws-locking.yaml and ws-rcu.yaml:
 <paste ws-rcu.yaml>
 
 Question: Is spin_lock() starvation-free under PREEMPT_RT?
-Clearly state which parts of your answer rely on:
-  [WS] — stated in the model
-  [WS→INFER] — chained from model facts
+
+For each claim in your answer, tag it with:
+  [WS(file:L100-L200)] — stated in the WS with provenance
+  [WS→INFER] — deduced from WS facts by causal chaining
   [KNOWLEDGE] — from training data, NOT in either WS
 ```
 
-If the AI relies heavily on [KNOWLEDGE], the WS is **too thin** and should be expanded.
-
 ### Example: Expansion request
 
-Submit when the WS cannot answer your question:
+Submit when no WS can answer your question:
 
 ```
 WORLD_SLICE_REQUEST:
