@@ -120,6 +120,7 @@ WORLD_SLICE_REQUEST:
 | **ws-vfs-block.yaml** | 502 | VFS read: syscall → page cache → bio | Full path from read() to disk? |
 | **ws-fs.yaml** | 527 | ext4 write: buffered → journal → writeback | When does write() data enter the journal? |
 | **ws-net.yaml** | 576 | TCP/IPv4: socket → handshake → data | State machine from connect() to ESTABLISHED? |
+| **ws-net-unexpected.yaml** | 534 | TCP/IPv4: unexpected segments per state | What happens when unexpected SYN/ACK/FIN/RST/DATA arrives in any TCP state? |
 
 ## Compression Ratio
 
@@ -139,7 +140,7 @@ WORLD_SLICE_REQUEST:
 
 ## Status
 
-**Built (7 completed):** ws-minimal-linux, ws-init, ws-locking, ws-rcu, ws-vfs-block, ws-fs, ws-net
-Total: 3,557 lines
+**Built (8 completed):** ws-minimal-linux, ws-init, ws-locking, ws-rcu, ws-vfs-block, ws-fs, ws-net, ws-net-unexpected
+Total: 4,091 lines
 
 **Not yet built (roadmap):** arch/x86, block (full), security, crypto, ipc, lib, drivers (device model), include/

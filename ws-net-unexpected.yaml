@@ -1,0 +1,534 @@
+# Linux TCP Unexpected Packet Handling World Slice v1.0
+# Expansion: unexpected TCP segment handling per state
+# coding-blueprints v2 — module-scoped, minimal strictness
+# Source: Linux 7.2-rc1 (~/Documents/code/linux/)
+# Parent: ws-net.yaml (Linux TCP/IP Networking World Slice v1.0)
+
+WorldSlice:
+
+  Metadata:
+    question: "How does Linux TCP handle unexpected TCP segments in different TCP states?"
+    normalized_objective: >
+      Map the TCP state-dependent handling of unexpected SYN, ACK,
+      FIN, RST, and DATA segments across all TCP states, covering
+      reset generation, silent drops, challenge ACKs, and TIME_WAIT
+      reopening semantics.
+    scope: module-scoped
+    strictness: minimal
+    source_repo: "Linux 7.2-rc1 — ~/Documents/code/linux/"
+    parent_world_slice:
+      name: "Linux TCP/IP Networking World Slice v1.0 (ws-net.yaml)"
+      missing_area:
+        - "Detailed TCP state machine edge cases"
+        - "Unexpected packet handling per TCP state"
+    non_goals:
+      - "Do not repeat normal TCP lifecycle describeed in parent WS"
+      - "Do not cover TCP congestion control"
+      - "Do not cover IPv6"
+      - "Do not cover NIC driver behavior"
+      - "Do not cover netfilter internals beyond hook existence"
+      - "Do not explain TCP option negotiation details (MSS, window scale, SACK)"
+
+  ConsumerInstructions:
+    reasoning_boundary:
+      - "Treat this World Slice as the complete known world for unexpected TCP segment handling."
+      - "Entities E1-E18 from ws-net.yaml (parent) are assumed known."
+      - "This WS defines only the edge case handling logic not covered in parent."
+      - "Use only facts supported by provenance."
+      - "Do not invent missing protocol states, socket flags, or timer mechanisms."
+      - "Separate Observation, Assumption, and Conclusion."
+      - "Mark claims as [WS], [WS->INFER], or [KNOWLEDGE]."
+    insufficient_scope_behavior:
+      - "Stop when insufficient. Form expansion query."
+    response_style:
+      name: "Technician Caveman"
+      rules:
+        - "Short sentences."
+        - "A -> B -> C causal chains."
+        - "State uncertainty explicitly."
+    uncertainty_format:
+      marker: "[Uncertain]"
+      behavior:
+        - "State what is unknown."
+        - "State what evidence is missing."
+        - "Produce a Scope Expansion Query."
+
+  Entities:
+    - id: E19
+      name: tcp_timewait_state_process
+      type: function
+      description: >
+        TIME_WAIT packet handler (net/ipv4/tcp_minisocks.c:101).
+        Called from tcp_v4_rcv when sk_state == TCP_TIME_WAIT.
+        Three substates: TCP_FIN_WAIT2 (half-close before TW) and
+        TCP_TIME_WAIT (full time-wait). Returns one of:
+        TCP_TW_SYN (reopen as SYN_RECV), TCP_TW_ACK (send ACK),
+        TCP_TW_RST (send RST + destroy), TCP_TW_SUCCESS (drop/
+        reschedule), TCP_TW_ACK_OOW (ACK out-of-window).
+        Inputs: tw (timewait sock), skb, th, tw_isn (output ISN
+        for SYN reopen), drop_reason.
+      PROV:
+        - net/ipv4/tcp_minisocks.c:L101-L289
+
+    - id: E20
+      name: tcp_reset
+      type: function
+      description: >
+        Handle incoming RST by terminating connection
+        (net/ipv4/tcp_input.c:4854). Called from tcp_validate_incoming
+        and tcp_rcv_synsent_state_process. Sets err per sk_state:
+        TCP_SYN_SENT -> ECONNREFUSED, TCP_CLOSE_WAIT -> EPIPE,
+        others -> ECONNRESET. Calls tcp_done_with_error to tear down.
+        Does NOT return (consumes skb, sets CLOSE state).
+      PROV:
+        - net/ipv4/tcp_input.c:L4854-L4880
+
+    - id: E21
+      name: tcp_v4_send_reset
+      type: function
+      description: >
+        Generate and send a TCP RST segment
+        (net/ipv4/tcp_ipv4.c). Called from:
+        - tcp_v4_rcv: when __inet_lookup_skb fails (no socket)
+        - tcp_v4_rcv: from TCP_TW_RST return in TIME_WAIT
+        - tcp_v4_rcv: from tcp_child_process failure
+        Sends RST with seq=rcv_nxt, ack=0 (if no socket) or
+        ack=seq+len (if in-window). Always drops skb after send.
+      PROV:
+        - net/ipv4/tcp_ipv4.c:L2259-L2281
+
+    - id: E22
+      name: tcp_send_challenge_ack
+      type: function
+      description: >
+        Send corrective ACK for out-of-window or invalid-SYN
+        segments (net/ipv4/tcp_input.c:4042). Called from:
+        tcp_validate_incoming (ESTABLISHED/SYN_RECV), and
+        tcp_rcv_state_process (CLOSE_WAIT/CLOSING/LAST_ACK).
+        Sends ACK with current rcv_nxt to help peer resync.
+        Two rate limits: per-socket (tcp_oow_rate_limited,
+        sysctl tcp_invalid_ratelimit default 500ms) and
+        host-wide (sysctl tcp_challenge_ack_limit, default
+        max(100, 2*retries) per second).
+      PROV:
+        - net/ipv4/tcp_input.c:L4042-L4074
+
+    - id: E23
+      name: tcp_send_dupack
+      type: function
+      description: >
+        Send duplicate ACK for out-of-order or invalid sequence
+        (net/ipv4/tcp_input.c). Called from tcp_validate_incoming
+        when: PAWS rejects timestamp (ESTABLISHED), segment
+        outside window, out-of-order data. Sends ACK with rcv_nxt
+        (no progress). Rate-limited per
+        tcp_oow_rate_limited/LINUX_MIB_TCPACKSKIPPEDSEQ.
+      PROV:
+        - net/ipv4/tcp_input.c:L6292-L6354
+
+    - id: E24
+      name: tcp_validate_incoming
+      type: function
+      description: >
+        Inbound segment validation gate for ESTABLISHED and
+        SYN_RECV states (net/ipv4/tcp_input.c:6292). Steps
+        in order: (1) PAWS timestamp check, (2) sequence
+        number window check, (3) RST bit check (RFC 5961),
+        (4) SYN bit check (RFC 5961). If any check fails:
+        sends corrective ACK (dupack or challenge ACK), or
+        resets depending on segment type. Returns true if
+        segment is valid, false if discarded.
+        Parameter syn_inerr: 1 for ESTABLISHED (counts
+        TCP_MIB_INERRS), 0 for non-established.
+      PROV:
+        - net/ipv4/tcp_input.c:L6292-L6445
+
+    - id: E25
+      name: tcp_rcv_synsent_state_process
+      type: function
+      description: >
+        SYN_SENT state receive dispatcher
+        (net/ipv4/tcp_input.c:6822). Called from
+        tcp_rcv_state_process for TCP_SYN_SENT. Handles:
+        - ACK check (RFC 793): if invalid seq -> RST
+        - RST with valid ACK -> tcp_reset (ECONNREFUSED)
+        - SYN+ACK -> transition to ESTABLISHED
+        - RST without ACK -> drop silently
+        - SYN without ACK -> simultaneous open (crossed SYNs)
+          transition to SYN_RECV
+        - PAWS reject -> drop silently
+        - No SYN, no RST -> drop + undo
+      PROV:
+        - net/ipv4/tcp_input.c:L6822-L7022
+
+  Relationships:
+    - id: R14
+      source: tcp_v4_rcv
+      target: tcp_timewait_state_process
+      type: calls
+      description: >
+        tcp_v4_rcv (L2289-L2336): if sk_state == TCP_TIME_WAIT,
+        goto do_time_wait -> calls tcp_timewait_state_process.
+        Does NOT call tcp_rcv_state_process or tcp_rcv_established.
+        Return value dispatches to:
+        TCP_TW_SYN -> look up listener, goto process
+        TCP_TW_ACK/TCP_TW_ACK_OOW -> tcp_v4_timewait_ack
+        TCP_TW_RST -> tcp_v4_send_reset + destroy TW
+        TCP_TW_SUCCESS -> drop silently, reschedule TW timer
+      PROV:
+        - net/ipv4/tcp_ipv4.c:L2289-L2337
+        - net/ipv4/tcp_minisocks.c:L101-L289
+
+    - id: R15
+      source: tcp_v4_rcv
+      target: tcp_v4_send_reset
+      type: triggers
+      description: >
+        tcp_v4_rcv (L2259-L2275): when __inet_lookup_skb returns
+        NULL (no socket for 4-tuple), goto no_tcp_socket ->
+        tcp_v4_send_reset(NULL, skb). Sends RST with no socket
+        context (sequence from skb). Only if checksum passes.
+      PROV:
+        - net/ipv4/tcp_ipv4.c:L2259-L2275
+
+    - id: R16
+      source: tcp_rcv_state_process
+      target: tcp_validate_incoming
+      type: calls
+      description: >
+        tcp_rcv_state_process (L7197): after TCP_CLOSE/LISTEN/
+        SYN_SENT switch, for all other states (SYN_RECV,
+        FIN_WAIT1/2, CLOSE_WAIT, CLOSING, LAST_ACK, TIME_WAIT)
+        calls tcp_validate_incoming(sk, skb, th, 0).
+        syn_inerr=0 means no INERRS count for these states.
+      PROV:
+        - net/ipv4/tcp_input.c:L7197-L7198
+
+    - id: R17
+      source: tcp_rcv_established
+      target: tcp_validate_incoming
+      type: calls
+      description: >
+        tcp_rcv_established slow path (L6642): after header
+        prediction fails, calls tcp_validate_incoming(sk, skb,
+        th, 1). syn_inerr=1 counts INERRS for ESTABLISHED.
+        If validation fails -> return (skb consumed or reset).
+      PROV:
+        - net/ipv4/tcp_input.c:L6642-L6643
+
+    - id: R18
+      source: tcp_validate_incoming
+      target: tcp_send_dupack
+      type: calls
+      description: >
+        tcp_validate_incoming calls tcp_send_dupack when:
+        (1) PAWS reject, segment passes timestamp check but
+        ts_recent > rcv_tsval (L6322-L6325), or
+        (2) sequence outside window, not RST (L6339-L6350).
+      PROV:
+        - net/ipv4/tcp_input.c:L6322-L6325
+        - net/ipv4/tcp_input.c:L6348-L6351
+
+    - id: R19
+      source: tcp_validate_incoming
+      target: tcp_send_challenge_ack
+      type: calls
+      description: >
+        tcp_validate_incoming calls tcp_send_challenge_ack when:
+        (1) RST with seq != rcv_nxt (RFC 5961 challenge) (L6395)
+        (2) SYN flag set on ESTABLISHED (L6427)
+      PROV:
+        - net/ipv4/tcp_input.c:L6395-L6397
+        - net/ipv4/tcp_input.c:L6426-L6427
+
+    - id: R20
+      source: tcp_validate_incoming
+      target: tcp_reset
+      type: calls
+      description: >
+        tcp_validate_incoming calls tcp_reset when:
+        (1) RST segment passes sequence check (L6351-L6352, L6370)
+        (2) RST matches rcv_nxt, rcv_nxt-1, or rightmost SACK
+      PROV:
+        - net/ipv4/tcp_input.c:L6351-L6352
+        - net/ipv4/tcp_input.c:L6368-L6370
+
+    - id: R21
+      source: tcp_timewait_state_process
+      target: tcp_v4_send_reset
+      type: triggers
+      description: >
+        tcp_timewait_state_process on TCP_TW_RST return causes
+        tcp_v4_rcv to call tcp_v4_send_reset (L2330-L2333).
+        Conditions: in-window RST with sysctl_tcp_rfc1337=0
+        (TIME_WAIT assassination), or invalid seq in TIMEWAIT
+        (L146-L150: SYN before rcv_nxt -> TCP_TW_RST).
+      PROV:
+        - net/ipv4/tcp_ipv4.c:L2330-L2333
+        - net/ipv4/tcp_minisocks.c:L146-L150
+        - net/ipv4/tcp_minisocks.c:L216-L220
+
+    - id: R22
+      source: tcp_send_dupack
+      target: tcp_ack_snd_check
+      type: triggers
+      description: >
+        tcp_send_dupack sends an ACK with current rcv_nxt
+        (no new data consumed). First dupack in ESTABLISHED
+        may trigger fast retransmit if SACK not enabled.
+      PROV:
+        - net/ipv4/tcp_input.c:L3600-L3650
+
+  Constraints:
+    - id: C5
+      applies_to: tcp_timewait_state_process
+      description: >
+        TCP_TIME_WAIT has three substates: TCP_FIN_WAIT2 (half-close
+        before TW) and TCP_TIME_WAIT (L132-L184 vs L203-L289).
+        In FIN_WAIT2: RST -> KILL, SYN before rcv_nxt -> RST,
+        duplicate ACK/FIN -> SUCCESS (reschedule), new data ->
+        RST. In TIME_WAIT: in-window RST -> KILL (unless
+        sysctl_tcp_rfc1337), bare ACK/FIN -> SUCCESS (reschedule
+        timer), SYN with seq > rcv_nxt (or PAWS-validated) ->
+        TCP_TW_SYN (reopen), OOW segment -> ACK-SKIPPED +
+        silent drop. TAIC: if TSecr == tw_ts_recent and
+        timestamp advances, accept SYN. Otherwise drop SYN + RST.
+      PROV:
+        - net/ipv4/tcp_minisocks.c:L132-L289
+
+    - id: C6
+      applies_to: tcp_rcv_state_process
+      description: >
+        TCP_LISTEN handler (L7136-L7162):
+        - ACK -> SKB_DROP_REASON_TCP_FLAGS (silent drop)
+        - RST -> SKB_DROP_REASON_TCP_RESET (silent drop)
+        - SYN+FIN -> SKB_DROP_REASON_TCP_FLAGS (silent drop)
+        - SYN -> icsk_conn_request (tcp_conn_request)
+        - Any other flags -> SKB_DROP_REASON_TCP_FLAGS (silent drop)
+        TCP_CLOSE -> unconditional discard (L7132-L7134).
+      PROV:
+        - net/ipv4/tcp_input.c:L7136-L7162
+
+    - id: C7
+      applies_to: tcp_rcv_synsent_state_process
+      description: >
+        TCP_SYN_SENT handler ordered by RFC 793 (L6836-L7022):
+        1. ACK check: if ack_seq outside (snd_una, snd_nxt] ->
+           RST (L6845-L6852)
+        2. PAWS on ACK: if timestamp invalid -> RST (L6855-L6862)
+        3. RST+ACK -> tcp_reset(ECONNREFUSED) -> CLOSED (L6872-L6877)
+        4. no SYN, no RST -> drop + undo (L6886-L6888)
+        5. SYN+ACK -> ESTABLISHED (L6890-L6973)
+        6. RST without ACK -> silent drop (L6978-L6986)
+        7. PAWS reject (no ACK) -> silent drop (L6988-L6993)
+        8. SYN without ACK -> crossed SYNs -> SYN_RECV (L6994-L7022)
+      PROV:
+        - net/ipv4/tcp_input.c:L6836-L7022
+
+    - id: C8
+      applies_to: tcp_validate_incoming
+      description: >
+        Validation order for ESTABLISHED/SYN_RECV (L6299-L6430):
+        1. PAWS check (RFC1323 H1): if fails and RST -> skip,
+           if SYN -> go to syn_challenge, if old-ACK -> silent drop,
+           else -> dupack + discard
+        2. Sequence check (RFC793 step1): if outside window
+           and not RST -> dupack + discard, if RST with valid
+           seq -> reset
+        3. RST check (RFC5961 3.2): if seq == rcv_nxt or
+           (rcv_nxt-1 after FIN) or rightmost SACK ->
+           reset, else challenge ACK + discard
+        4. SYN check (RFC5961 4.2): if SYN on ESTABLISHED ->
+           challenge ACK + discard (syn_challenge)
+      PROV:
+        - net/ipv4/tcp_input.c:L6299-L6430
+
+    - id: C9
+      applies_to: tcp_rcv_state_process
+      description: >
+        CLOSE_WAIT/CLOSING/LAST_ACK data handling (L7342-L7373):
+        - If seq < rcv_nxt (old data): drop silently
+        - seq >= rcv_nxt: queue data
+        - FIN_WAIT1/FIN_WAIT2 with RCV_SHUTDOWN (RFC 1122):
+          new data after FIN -> tcp_reset + abort
+        - FIN_WAIT1/FIN_WAIT2 without RCV_SHUTDOWN -> queue data
+      PROV:
+        - net/ipv4/tcp_input.c:L7342-L7373
+
+    - id: C10
+      applies_to: tcp_reset
+      description: >
+        tcp_reset switches on sk_state for error code (L4867-L4878):
+        TCP_SYN_SENT -> ECONNREFUSED, TCP_CLOSE_WAIT -> EPIPE,
+        TCP_CLOSE -> return (no-op), default -> ECONNRESET.
+        Always calls tcp_done_with_error(sk, err) which sets
+        state to TCP_CLOSE and wakes up waiters.
+      PROV:
+        - net/ipv4/tcp_input.c:L4867-L4879
+
+    - id: C11
+      applies_to: tcp_send_challenge_ack
+      description: >
+        Two rate limiters (L4048-L4073):
+        (1) Per-socket: sysctl tcp_invalid_ratelimit (default 500ms)
+          via tcp_oow_rate_limited. Skips if last ack < ratelimit.
+        (2) Host-wide: sysctl tcp_challenge_ack_limit.
+          Randomizes count per second to avoid ACK-storm
+          synchronization. Default max(100, 2*tcp_max_retries).
+      PROV:
+        - net/ipv4/tcp_input.c:L4048-L4073
+
+  Mechanisms:
+    - id: M4
+      name: UnexpectedSegmentHandlingMatrix
+      description: >
+        Per-state dispatch of unexpected TCP segments.
+        Covers all states and flag combinations not part
+        of normal connection lifecycle.
+      chain:
+        - step: "TCP_LISTEN segment dispatch"
+          entity: tcp_rcv_state_process
+          action: >
+            LISTEN (L7136-L7162): ACK -> silent drop (TCP_FLAGS).
+            RST -> silent drop (TCP_RESET). SYN -> tcp_conn_request
+            (normal path, see parent WS M2). SYN+FIN -> silent drop.
+            DATA without any SYN/RST -> silent drop.
+          PROV:
+            - net/ipv4/tcp_input.c:L7136-L7162
+
+        - step: "TCP_SYN_SENT segment dispatch"
+          entity: tcp_rcv_synsent_state_process
+          action: >
+            SYN_SENT (L6836-L7022): invalid ACK -> send RST.
+            valid ACK+RST -> tcp_reset (ECONNREFUSED).
+            valid ACK+SYN -> ESTABLISHED (normal handshake).
+            valid ACK only (no SYN/RST) -> drop+undo.
+            RST without ACK -> silent drop.
+            SYN without ACK -> crossed SYNs -> SYN_RECV.
+            PAWS reject on ACK -> RST.
+          PROV:
+            - net/ipv4/tcp_input.c:L6836-L7022
+
+        - step: "TCP_ESTABLISHED invalid segment validation"
+          entity: tcp_validate_incoming
+          action: >
+            ESTABLISHED (L6300-L6430): PAWS fail (old timestamp)
+            -> dupack+discard. PAWS fail (old ACK) -> silent drop.
+            Seq outside window, not RST -> dupack+discard.
+            Seq outside window, RST valid -> tcp_reset.
+            Seq inside window, RST match -> tcp_reset.
+            Seq inside window, RST no-match -> challenge ACK.
+            SYN flag -> challenge ACK (RFC 5961 4.2).
+          PROV:
+            - net/ipv4/tcp_input.c:L6299-L6430
+
+        - step: "TCP_FIN_WAIT1/CLOSE_WAIT/CLOSING/LAST_ACK data"
+          entity: tcp_rcv_state_process
+          action: >
+            FIN states (L7342-L7373): old data (seq < rcv_nxt)
+            -> drop. New data in FIN_WAIT with RCV_SHUTDOWN
+            -> tcp_reset. New data in CLOSING/LAST_ACK/CLOSE_WAIT
+            -> queue via tcp_data_queue.
+          PROV:
+            - net/ipv4/tcp_input.c:L7342-L7373
+
+        - step: "TCP_FIN_WAIT2 half-close"
+          entity: tcp_timewait_state_process
+          action: >
+            FIN_WAIT2 substate (L132-L184): out-of-window -> ACK
+            skipped (LINUX_MIB_TCPACKSKIPPEDFINWAIT2). RST -> KILL.
+            SYN with seq before rcv_nxt -> TCP_TW_RST.
+            Duplicate ACK/FIN -> SUCCESS (reschedule TW timer).
+            New data or FIN -> TCP_TW_RST (reset).
+          PROV:
+            - net/ipv4/tcp_minisocks.c:L132-L184
+
+        - step: "TCP_TIME_WAIT full state"
+          entity: tcp_timewait_state_process
+          action: >
+            TIME_WAIT (L203-L289): in-window RST -> KILL
+            (unless sysctl_tcp_rfc1337, see C5). In-window
+            bare ACK -> SUCCESS + reschedule. Out-of-window
+            non-RST -> ACK skipped rate-limited. SYN with
+            seq > rcv_nxt or PAWS-valid -> TCP_TW_SYN
+            (reopen: look up listener, goto process).
+            PAWS reject SYN -> drop + rate-limited ACK.
+          PROV:
+            - net/ipv4/tcp_minisocks.c:L203-L289
+
+        - step: "No-socket segment (port with no listener)"
+          entity: tcp_v4_rcv
+          action: >
+            no_tcp_socket (L2259-L2281): __inet_lookup_skb fails.
+            If checksum OK: tcp_v4_send_reset(NULL, skb) sends
+            RST to originator (4-tuple from packet). If checksum
+            bad: goto csum_error/bad_packet, count INERRS, drop.
+          PROV:
+            - net/ipv4/tcp_ipv4.c:L2259-L2275
+
+      effects:
+        - entity: struct sock
+          change:
+            from: "Any TCP state"
+            to: "state-dependent (CLOSED, TIME_WAIT, or stay unchanged)"
+          PROV:
+            - net/ipv4/tcp_input.c:L6292-L6445
+            - net/ipv4/tcp_minisocks.c:L101-L289
+            - net/ipv4/tcp_ipv4.c:L2259-L2281
+      constraints:
+        - C5
+        - C6
+        - C7
+        - C8
+        - C9
+        - C10
+        - C11
+      PROV:
+        - net/ipv4/tcp_input.c:L6292-L6445
+        - net/ipv4/tcp_input.c:L6836-L7022
+        - net/ipv4/tcp_input.c:L7122-L7391
+        - net/ipv4/tcp_minisocks.c:L101-L289
+        - net/ipv4/tcp_ipv4.c:L2259-L2281
+
+  MissingScope:
+    - topic: "TCP simultaneous close race conditions"
+      reason: "Current slice covers basic per-state dispatch. Simultaneous close with overlapping sequence spaces may have additional edge cases."
+      required_for: "Full coverage of all TCP edge case behaviors"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How does Linux TCP handle simultaneous close races (both sides sending FIN at same time)?"
+          scope: module-scoped
+          strictness: minimal
+          target:
+            - "net/ipv4/tcp_input.c"
+        Missing because:
+          - "Current slice covers per-state dispatch but not race conditions"
+
+    - topic: "TCP timers interaction with unexpected segments"
+      reason: "Unexpected segments can reset or interact with retransmit, keepalive, and TIME_WAIT timers."
+      required_for: "Complete understanding of segment processing side effects"
+      expansion_query: |
+        WORLD_SLICE_REQUEST:
+          question: "How do Linux TCP timers (retransmit, keepalive, TIME_WAIT, delayed ACK) interact with unexpected packet arrival?"
+          scope: module-scoped
+          strictness: minimal
+          target:
+            - "net/ipv4/tcp_timer.c"
+        Missing because:
+          - "Current slice covers per-segment dispatch but not timer cross-effects"
+
+  Coverage:
+    Included:
+      - target: net/ipv4/tcp_input.c
+        reason: "tcp_rcv_state_process, tcp_rcv_established, tcp_validate_incoming, tcp_rcv_synsent_state_process, tcp_reset, tcp_send_challenge_ack, tcp_send_dupack"
+      - target: net/ipv4/tcp_ipv4.c
+        reason: "tcp_v4_rcv, tcp_v4_send_reset, no_socket and TIME_WAIT dispatch"
+      - target: net/ipv4/tcp_minisocks.c
+        reason: "tcp_timewait_state_process — FIN_WAIT2 and TIME_WAIT substates"
+    Excluded:
+      - target: net/ipv4/tcp_cong.c
+        reason: "Congestion control — separate scope"
+      - target: net/ipv4/tcp_timer.c
+        reason: "Timer interactions with unexpected segments — separate scope"
+      - target: include/net/tcp.h
+        reason: "Header definitions — parent WS covers tcp_sock fields"
