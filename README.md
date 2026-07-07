@@ -44,9 +44,58 @@ Question: From write() to data landing on SSD,
 which kernel subsystems does it pass through?
 ```
 
-### Example: When WS is not enough
+### Example: Traceability — Which parts come from the World Slice?
 
-Submit an expansion request:
+Good AI reasoning requires distinguishing **WS-grounded facts** from **model-internal knowledge**. Ask for this explicitly:
+
+```
+I have the following World Slice:
+
+<paste ws-init.yaml>
+
+Question: Why does start_kernel call mm_core_init() BEFORE sched_init()?
+
+For each claim in your answer, mark:
+  [WS] = Directly stated in the World Slice
+  [WS→INFER] = Deduced from WS facts by causal chaining
+  [KNOWLEDGE] = From your training data, NOT in the WS
+```
+
+Expected answer shape (not exact):
+
+```
+[WS] start_kernel order: mm_core_init() → sched_init()
+[WS] mm_core_init() builds the page allocator (struct page, buddy)
+[WS→INFER] The scheduler needs struct page to allocate task_struct.
+  If sched_init ran first, kmem_cache_alloc would dereference
+  uninitialised memory — instant triple fault.
+[KNOWLEDGE] The boot CPU stack is hand-wired in arch/x86 before
+  C code runs. The WS doesn't cover arch/, but that's outside scope
+  because Linux 7.2 boot convention is canonical.
+```
+
+This forces the AI to admit **what it knows from the WS** vs **what it fills in from general kernel knowledge**.
+
+### Example: When WS is insufficient
+
+```
+I have ws-locking.yaml and ws-rcu.yaml:
+
+<paste ws-locking.yaml>
+<paste ws-rcu.yaml>
+
+Question: Is spin_lock() starvation-free under PREEMPT_RT?
+Clearly state which parts of your answer rely on:
+  [WS] — stated in the model
+  [WS→INFER] — chained from model facts
+  [KNOWLEDGE] — from training data, NOT in either WS
+```
+
+If the AI relies heavily on [KNOWLEDGE], the WS is **too thin** and should be expanded.
+
+### Example: Expansion request
+
+Submit when the WS cannot answer your question:
 
 ```
 WORLD_SLICE_REQUEST:
